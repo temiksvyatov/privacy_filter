@@ -41,3 +41,28 @@ Touched: `pf_tester/filter.py`. Tests: 27/27 green.
   the pydantic body model.
 
 Tests: added 3 cases (`oversized_text`, `mask_char_too_long` ×2). 30/30 green.
+
+### 3. `feat(cache): thread-safe LRU module + faster blake2b key`
+
+- **A1** (REVIEW §1.2): the detection cache was a bare `OrderedDict`
+  mutated from sync endpoints in FastAPI's threadpool. Concurrent
+  `move_to_end` / `popitem` would intermittently raise
+  `RuntimeError: dictionary changed size during iteration` under load.
+  New `pf_tester/cache.py` wraps an `OrderedDict` in a `threading.Lock`
+  and exposes `get` / `put` / `clear` / `stats`.
+- **A8** (REVIEW §1.2): cache logic no longer lives in the HTTP module.
+  `service.py` now imports `SpanListCache` and `detect_cache_key` from a
+  dedicated module, making a future Redis swap an interface change.
+- **P1** (REVIEW §2.2): hashed key switched from SHA-256 over a JSON
+  blob to `blake2b(digest_size=16)` — ~2–3× faster on CPython for the
+  long-text case.
+- **P2** (REVIEW §2.2): replaced `json.dumps({...})` with a tagged
+  concatenation (`text \x1f score \x1f flag`) — cheaper and immune to
+  json-escape edge cases. Tagged with ASCII Unit Separator to avoid
+  field-boundary collisions.
+- `/health` now reports `cache_hits` / `cache_misses` so operators can
+  see hit-rate without `/metrics` (still on the roadmap, **P9**).
+
+Tests: added `tests/test_cache.py` with 9 cases covering LRU semantics,
+hit/miss accounting, capacity validation, concurrent writers (8 threads
+× 2000 ops) and key derivation properties. 39/39 green.

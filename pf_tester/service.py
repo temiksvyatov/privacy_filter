@@ -7,10 +7,7 @@ Run with:
 
 from __future__ import annotations
 
-import hashlib
-import json
 import os
-from collections import OrderedDict
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -20,6 +17,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
+from .cache import SpanListCache, detect_cache_key
 from .filter import DEFAULT_MODEL, PrivacyFilter, Span, get_filter
 from .ru_postpass import ru_postpass
 from .samples import SAMPLES
@@ -97,35 +95,24 @@ class RedactResponse(BaseModel):
     cached: bool = False
 
 
-# --- detection cache --------------------------------------------------------
-# Caches model output (list of Span) keyed by hash of (text, min_score,
-# ru_postpass). Redaction is cheap and parameterised differently, so it is
-# done on every request after pulling spans from the cache.
+# Detection cache: model spans keyed by (text, min_score, ru_postpass).
+# Redaction is cheap and parameterised differently — it runs on every request
+# against spans pulled from this cache. See pf_tester/cache.py for the lock.
 
-_detect_cache: "OrderedDict[str, list[Span]]" = OrderedDict()
-
-
-def _cache_key(text: str, min_score: float, ru_postpass_on: bool) -> str:
-    payload = json.dumps(
-        {"t": text, "ms": round(min_score, 4), "ru": bool(ru_postpass_on)},
-        ensure_ascii=False,
-    ).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
+_detect_cache: SpanListCache = SpanListCache(CACHE_SIZE)
 
 
 def _detect_cached(
     pf: PrivacyFilter, text: str, min_score: float, ru_postpass_on: bool
 ) -> tuple[list[Span], bool]:
-    key = _cache_key(text, min_score, ru_postpass_on)
-    if key in _detect_cache:
-        _detect_cache.move_to_end(key)
-        return _detect_cache[key], True
+    key = detect_cache_key(text, min_score, ru_postpass_on)
+    cached, hit = _detect_cache.get(key)
+    if hit:
+        return cached, True
     spans = pf.detect(text, min_score=min_score)
     if ru_postpass_on:
         spans = ru_postpass(text, spans)
-    _detect_cache[key] = spans
-    if len(_detect_cache) > CACHE_SIZE:
-        _detect_cache.popitem(last=False)
+    _detect_cache.put(key, spans)
     return spans, False
 
 
@@ -178,12 +165,15 @@ def index() -> FileResponse:
 
 @app.get("/health")
 def health() -> dict[str, object]:
+    stats = _detect_cache.stats()
     return {
         "status": "ok",
         "model": MODEL_NAME,
         "domain": DOMAIN,
-        "cache_size": len(_detect_cache),
-        "cache_capacity": CACHE_SIZE,
+        "cache_size": stats["size"],
+        "cache_capacity": stats["capacity"],
+        "cache_hits": stats["hits"],
+        "cache_misses": stats["misses"],
     }
 
 
