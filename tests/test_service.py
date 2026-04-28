@@ -1,0 +1,70 @@
+"""Service smoke tests that monkeypatch the model so they run without GPU/network."""
+
+from fastapi.testclient import TestClient
+
+from pf_tester import filter as pf_filter
+from pf_tester.filter import PrivacyFilter, Span
+import pf_tester.service as svc
+
+
+class _FakePF(PrivacyFilter):
+    def __init__(self):
+        self.model_name = "fake/privacy-filter"
+        self.aggregation_strategy = "simple"
+        self._pipe = None
+
+    def detect(self, text):
+        if "alice@example.com" in text:
+            start = text.index("alice@example.com")
+            return [Span(
+                entity="private_email",
+                text="alice@example.com",
+                start=start,
+                end=start + len("alice@example.com"),
+                score=0.99,
+            )]
+        return []
+
+
+def _install_fake(monkeypatch):
+    fake = _FakePF()
+    pf_filter.get_filter.cache_clear()
+    monkeypatch.setattr(svc, "get_filter", lambda *a, **kw: fake)
+
+
+def test_health(monkeypatch):
+    _install_fake(monkeypatch)
+    client = TestClient(svc.app)
+    r = client.get("/health")
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
+
+
+def test_detect_endpoint(monkeypatch):
+    _install_fake(monkeypatch)
+    client = TestClient(svc.app)
+    r = client.post("/detect", json={"text": "ping alice@example.com please"})
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["spans"][0]["entity"] == "private_email"
+    assert payload["spans"][0]["text"] == "alice@example.com"
+
+
+def test_redact_endpoint(monkeypatch):
+    _install_fake(monkeypatch)
+    client = TestClient(svc.app)
+    r = client.post(
+        "/redact",
+        json={"text": "ping alice@example.com please", "placeholder": "[X]"},
+    )
+    assert r.status_code == 200
+    assert r.json()["redacted"] == "ping [X] please"
+
+
+def test_samples_endpoint(monkeypatch):
+    _install_fake(monkeypatch)
+    client = TestClient(svc.app)
+    r = client.get("/samples")
+    assert r.status_code == 200
+    body = r.json()
+    assert "person_address_date" in body

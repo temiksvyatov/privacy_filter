@@ -1,0 +1,43 @@
+"""Pure unit tests for the redaction helper that don't load the real model."""
+
+from pf_tester.filter import PrivacyFilter, Span
+
+
+class _Stub(PrivacyFilter):
+    def __init__(self):  # bypass model loading
+        self.model_name = "stub"
+        self.aggregation_strategy = "simple"
+        self._pipe = None
+
+
+def test_redact_replaces_spans_with_entity_tag():
+    pf = _Stub()
+    text = "Alice lives in Berlin."
+    spans = [
+        Span(entity="private_person", text="Alice", start=0, end=5, score=0.99),
+        Span(entity="private_address", text="Berlin", start=15, end=21, score=0.98),
+    ]
+    assert pf.redact(text, spans=spans) == "[PRIVATE_PERSON] lives in [PRIVATE_ADDRESS]."
+
+
+def test_redact_with_custom_placeholder():
+    pf = _Stub()
+    text = "Email me at a@b.com."
+    spans = [Span(entity="private_email", text="a@b.com", start=12, end=19, score=0.99)]
+    assert pf.redact(text, placeholder="[REDACTED]", spans=spans) == "Email me at [REDACTED]."
+
+
+def test_redact_no_spans_returns_original():
+    pf = _Stub()
+    assert pf.redact("nothing sensitive here", spans=[]) == "nothing sensitive here"
+
+
+def test_redact_skips_overlapping_spans():
+    pf = _Stub()
+    text = "abcdef"
+    spans = [
+        Span(entity="x", text="abc", start=0, end=3, score=0.9),
+        Span(entity="y", text="bcd", start=1, end=4, score=0.9),  # overlaps, dropped
+        Span(entity="z", text="ef", start=4, end=6, score=0.9),
+    ]
+    assert pf.redact(text, spans=spans) == "[X]d[Z]"
