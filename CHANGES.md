@@ -203,6 +203,14 @@ Tests: 5 new cases (livez, readyz×2, health limits, 503 leak guard).
 
 Tests: 56/56 still green; package import smoke-tested manually.
 
+### 9. `fix(service): use typing_extensions.TypedDict on py<3.12`
+
+- Startup crash on Python 3.11 with Pydantic v2: Pydantic requires
+  `typing_extensions.TypedDict` (not `typing.TypedDict`) for schema
+  generation on Python < 3.12. Switched import in `pf_tester/service.py`.
+
+Tests: 56/56 green.
+
 ---
 
 ## Summary
