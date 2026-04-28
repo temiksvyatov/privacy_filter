@@ -64,11 +64,22 @@ class PrivacyFilter:
         text: str,
         placeholder: str | None = None,
         spans: Iterable[Span] | None = None,
+        mask_char: str | None = None,
     ) -> str:
-        """Replace detected PII spans with `[ENTITY]` (or a custom placeholder)."""
+        """Replace detected PII spans.
+
+        Precedence:
+          1. `mask_char` — repeat the char for the full span length
+             (e.g. "Иванов" -> "******"). Handy for sanitizing logs while
+             preserving layout.
+          2. `placeholder` — replace each span with this exact string.
+          3. default — typed tag like `[PRIVATE_PERSON]`.
+        """
         spans = list(spans) if spans is not None else self.detect(text)
         if not spans:
             return text
+        if mask_char is not None and len(mask_char) != 1:
+            raise ValueError("mask_char must be a single character")
         ordered = sorted(spans, key=lambda s: s.start)
         out: list[str] = []
         cursor = 0
@@ -76,8 +87,12 @@ class PrivacyFilter:
             if s.start < cursor:
                 continue
             out.append(text[cursor:s.start])
-            tag = placeholder if placeholder is not None else f"[{s.entity.upper()}]"
-            out.append(tag)
+            if mask_char is not None:
+                out.append(mask_char * (s.end - s.start))
+            elif placeholder is not None:
+                out.append(placeholder)
+            else:
+                out.append(f"[{s.entity.upper()}]")
             cursor = s.end
         out.append(text[cursor:])
         return "".join(out)

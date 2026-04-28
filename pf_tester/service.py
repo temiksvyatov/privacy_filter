@@ -31,6 +31,14 @@ class RedactRequest(BaseModel):
         description="If set, every detected span is replaced with this string. "
                     "Otherwise spans are replaced with `[ENTITY_TYPE]`.",
     )
+    mask_char: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=1,
+        description="Single character that repeats over the full span length "
+                    "(e.g. '*' turns 'Alice' into '*****'). Takes precedence "
+                    "over `placeholder`.",
+    )
 
 
 class SpanOut(BaseModel):
@@ -98,7 +106,12 @@ def detect(req: DetectRequest) -> DetectResponse:
 def redact(req: RedactRequest) -> RedactResponse:
     pf = _pf()
     spans = pf.detect(req.text)
-    redacted = pf.redact(req.text, placeholder=req.placeholder, spans=spans)
+    redacted = pf.redact(
+        req.text,
+        placeholder=req.placeholder,
+        spans=spans,
+        mask_char=req.mask_char,
+    )
     return RedactResponse(
         model=pf.model_name,
         redacted=redacted,

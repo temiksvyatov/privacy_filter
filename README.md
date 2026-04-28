@@ -40,8 +40,15 @@ python -m pf_tester.cli --json "Email me at bob@acme.io"
 # прогнать все встроенные сэмплы
 python -m pf_tester.cli --suite
 
-# выбрать устройство и кастомный плейсхолдер
-python -m pf_tester.cli --device cpu --placeholder "***" "Call +1 415 555 0142"
+# кастомный плейсхолдер: каждый спан -> одна строка
+python -m pf_tester.cli --placeholder "[REDACTED]" "Call Alice at +1 415 555 0142"
+
+# маскировка звёздочками: длина PII сохраняется
+python -m pf_tester.cli --stars "Call Alice at +1 415 555 0142"
+# Call ***** at ****************
+
+# любой другой символ-маска
+python -m pf_tester.cli --mask-char "#" "Call Alice"
 ```
 
 Вывод по умолчанию — таблица `rich` с найденными спанами + редактированный
@@ -74,6 +81,16 @@ curl -s localhost:8000/detect \
 curl -s localhost:8000/redact \
   -H 'content-type: application/json' \
   -d '{"text":"Token sk-proj-AbCd...","placeholder":"[REDACTED]"}' | jq
+```
+
+Маскировка одним символом с сохранением длины (`mask_char` приоритетнее `placeholder`):
+
+```bash
+curl -s localhost:8000/redact \
+  -H 'content-type: application/json' \
+  -d '{"text":"Иванов Иван, +7 495 123-45-67","mask_char":"*"}' \
+  | jq -r '.redacted'
+# *********** **, ****************
 ```
 
 Конфиг через переменные окружения:

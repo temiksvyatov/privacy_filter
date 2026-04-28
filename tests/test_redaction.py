@@ -41,3 +41,27 @@ def test_redact_skips_overlapping_spans():
         Span(entity="z", text="ef", start=4, end=6, score=0.9),
     ]
     assert pf.redact(text, spans=spans) == "[X]d[Z]"
+
+
+def test_redact_mask_char_preserves_length():
+    pf = _Stub()
+    text = "Иванов lives in Berlin."
+    spans = [
+        Span(entity="private_person", text="Иванов", start=0, end=6, score=0.99),
+        Span(entity="private_address", text="Berlin", start=16, end=22, score=0.98),
+    ]
+    assert pf.redact(text, spans=spans, mask_char="*") == "****** lives in ******."
+
+
+def test_redact_mask_char_wins_over_placeholder():
+    pf = _Stub()
+    text = "abc"
+    spans = [Span(entity="x", text="abc", start=0, end=3, score=0.9)]
+    assert pf.redact(text, spans=spans, placeholder="[Z]", mask_char="*") == "***"
+
+
+def test_redact_mask_char_must_be_single_char():
+    pf = _Stub()
+    import pytest
+    with pytest.raises(ValueError):
+        pf.redact("abc", spans=[Span("x", "abc", 0, 3, 0.9)], mask_char="**")

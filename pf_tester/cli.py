@@ -35,9 +35,24 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--model", default=DEFAULT_MODEL, help="HuggingFace model id.")
     p.add_argument("--device", default=None, help="`cpu`, `cuda`, `cuda:0`, or an int.")
     p.add_argument("--placeholder", default=None, help="Override the redaction placeholder.")
+    p.add_argument(
+        "--mask-char",
+        default=None,
+        help="Replace every PII char with this single character (preserves length).",
+    )
+    p.add_argument(
+        "--stars",
+        action="store_true",
+        help="Shortcut for --mask-char '*'.",
+    )
     p.add_argument("--json", action="store_true", help="Emit JSON instead of pretty output.")
     p.add_argument("--suite", action="store_true", help="Run the built-in PII sample suite.")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if args.stars:
+        if args.mask_char and args.mask_char != "*":
+            p.error("--stars conflicts with --mask-char")
+        args.mask_char = "*"
+    return args
 
 
 def _read_input(args: argparse.Namespace) -> str:
@@ -69,9 +84,15 @@ def _render_pretty(text: str, spans: Iterable[Span], redacted: str) -> None:
     console.print(redacted)
 
 
-def _run_one(pf: PrivacyFilter, text: str, placeholder: str | None, as_json: bool) -> None:
+def _run_one(
+    pf: PrivacyFilter,
+    text: str,
+    placeholder: str | None,
+    mask_char: str | None,
+    as_json: bool,
+) -> None:
     spans = pf.detect(text)
-    redacted = pf.redact(text, placeholder=placeholder, spans=spans)
+    redacted = pf.redact(text, placeholder=placeholder, spans=spans, mask_char=mask_char)
     if as_json:
         print(json.dumps(
             {
@@ -86,11 +107,16 @@ def _run_one(pf: PrivacyFilter, text: str, placeholder: str | None, as_json: boo
         _render_pretty(text, spans, redacted)
 
 
-def _run_suite(pf: PrivacyFilter, placeholder: str | None, as_json: bool) -> None:
+def _run_suite(
+    pf: PrivacyFilter,
+    placeholder: str | None,
+    mask_char: str | None,
+    as_json: bool,
+) -> None:
     results = []
     for name, text in SAMPLES.items():
         spans = pf.detect(text)
-        redacted = pf.redact(text, placeholder=placeholder, spans=spans)
+        redacted = pf.redact(text, placeholder=placeholder, spans=spans, mask_char=mask_char)
         if as_json:
             results.append({
                 "name": name,
@@ -110,11 +136,11 @@ def main(argv: list[str] | None = None) -> int:
     pf = PrivacyFilter(model_name=args.model, device=args.device)
 
     if args.suite:
-        _run_suite(pf, args.placeholder, args.json)
+        _run_suite(pf, args.placeholder, args.mask_char, args.json)
         return 0
 
     text = _read_input(args)
-    _run_one(pf, text, args.placeholder, args.json)
+    _run_one(pf, text, args.placeholder, args.mask_char, args.json)
     return 0
 
 
