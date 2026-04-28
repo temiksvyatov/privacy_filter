@@ -117,3 +117,37 @@ contract. 42/42 green.
 Tests: added 8 cases (modern TLDs, Cyrillic TLDs, loose vs strict
 behaviour for bare numbers, strict-mode INN with context, span-text
 substring contract, service-level F5 + strict propagation). 51/51 green.
+
+### 6. `feat(service): async endpoints, bounded inference, probes`
+
+- **A2** (REVIEW §1.2): sync endpoints used to dump every inference job
+  into FastAPI's default 40-thread pool, where the requests fought over
+  the GIL and pipeline internals. `/detect`, `/redact` and `/redact/file`
+  are now `async def`. They take a slot from a process-wide
+  `asyncio.Semaphore(PF_INFERENCE_CONCURRENCY)` (default 2) before
+  offloading the blocking detect call to a thread via
+  `asyncio.to_thread`. Cache hits short-circuit before the semaphore so
+  hot paths stay zero-cost.
+- **S2** (REVIEW §4): same semaphore doubles as the rate-limiter for
+  expensive paths. Operators bump it from `PF_INFERENCE_CONCURRENCY`
+  (env). 100 concurrent clients no longer OOM the box; they queue.
+- **A3** (REVIEW §1.2): the lifespan `prewarm` had no error handling. A
+  download failure (no internet, expired HF token) used to crash the
+  process at startup. Now we log the traceback and start the app in
+  `_READY=False` state — the readiness probe refuses traffic until the
+  model loads on a subsequent attempt. Liveness stays green so
+  orchestrators don't loop-restart a process that can't reach HF.
+- **A4 / S3** (REVIEW §1.2 / §4): `_pf()` used to leak `str(exc)` into
+  the HTTP response body — HF errors carry filesystem paths, env
+  usernames, sometimes tokens. Replace with a generic 503 + structured
+  log of the full traceback server-side. Added `test_pf_unavailable_returns_503`
+  to assert the secret-shaped string in the underlying exception does
+  not appear in the response.
+- Added `/livez` (always 200 once the process answers) and `/readyz`
+  (200 only when `_READY`). `/health` now also reports
+  `max_text_bytes`, `max_upload_bytes` and `inference_concurrency` so
+  the UI can read configured limits without env duplication (next
+  commit wires this up).
+
+Tests: 5 new cases (livez, readyz×2, health limits, 503 leak guard).
+56/56 green.

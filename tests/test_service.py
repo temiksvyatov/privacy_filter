@@ -1,5 +1,7 @@
 """Service smoke tests that monkeypatch the model so they run without GPU/network."""
 
+import asyncio
+
 from fastapi.testclient import TestClient
 
 from pf_tester import filter as pf_filter
@@ -30,10 +32,19 @@ class _FakePF(PrivacyFilter):
 
 
 def _install_fake(monkeypatch):
+    """Wire up a fake filter and pre-flip readiness/semaphore.
+
+    The service relies on the lifespan handler to load the model and
+    create the inference semaphore. TestClient skips lifespan unless
+    used as a context manager — these tests instantiate it directly,
+    so we set those globals manually.
+    """
     fake = _FakePF()
     pf_filter.get_filter.cache_clear()
     svc._detect_cache.clear()
     monkeypatch.setattr(svc, "get_filter", lambda *a, **kw: fake)
+    monkeypatch.setattr(svc, "_READY", True)
+    monkeypatch.setattr(svc, "_inference_semaphore", asyncio.Semaphore(svc.INFERENCE_CONCURRENCY))
 
 
 def test_health(monkeypatch):
@@ -206,3 +217,51 @@ def test_postpass_strict_skips_bare_numbers_via_api(monkeypatch):
     r = client.post("/detect", json=body)
     assert r.status_code == 200
     assert r.json()["spans"] == []
+
+
+def test_livez_always_ok(monkeypatch):
+    monkeypatch.setattr(svc, "_READY", False)
+    client = TestClient(svc.app)
+    r = client.get("/livez")
+    assert r.status_code == 200
+
+
+def test_readyz_503_when_not_ready(monkeypatch):
+    monkeypatch.setattr(svc, "_READY", False)
+    client = TestClient(svc.app)
+    r = client.get("/readyz")
+    assert r.status_code == 503
+
+
+def test_readyz_200_when_ready(monkeypatch):
+    _install_fake(monkeypatch)
+    client = TestClient(svc.app)
+    r = client.get("/readyz")
+    assert r.status_code == 200
+
+
+def test_health_reports_limits(monkeypatch):
+    _install_fake(monkeypatch)
+    client = TestClient(svc.app)
+    body = client.get("/health").json()
+    assert "max_text_bytes" in body
+    assert "max_upload_bytes" in body
+    assert body["inference_concurrency"] >= 1
+
+
+def test_pf_unavailable_returns_503(monkeypatch):
+    pf_filter.get_filter.cache_clear()
+    svc._detect_cache.clear()
+
+    def boom(*a, **kw):
+        raise RuntimeError("HF token expired (would-be-secret)")
+
+    monkeypatch.setattr(svc, "get_filter", boom)
+    monkeypatch.setattr(svc, "_READY", True)
+    monkeypatch.setattr(svc, "_inference_semaphore", asyncio.Semaphore(1))
+    client = TestClient(svc.app)
+    r = client.post("/detect", json={"text": "anything"})
+    assert r.status_code == 503
+    # Make sure the inner error message did not leak to the client.
+    assert "HF token" not in r.text
+    assert "would-be-secret" not in r.text

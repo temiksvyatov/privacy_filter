@@ -7,6 +7,8 @@ Run with:
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -22,6 +24,8 @@ from .filter import DEFAULT_MODEL, PrivacyFilter, Span, get_filter
 from .ru_postpass import ru_postpass
 from .samples import SAMPLES
 
+logger = logging.getLogger("pf_tester.service")
+
 MODEL_NAME = os.getenv("PF_MODEL", DEFAULT_MODEL)
 DEVICE = os.getenv("PF_DEVICE")  # e.g. "cpu", "cuda", "cuda:0"
 DOMAIN = os.getenv("DOMAIN", "").strip()
@@ -29,6 +33,15 @@ CACHE_SIZE = int(os.getenv("PF_CACHE_SIZE", "256"))
 MAX_UPLOAD_BYTES = int(os.getenv("PF_MAX_UPLOAD_BYTES", str(5 * 1024 * 1024)))
 # Hard cap on JSON-body text to mirror the upload limit; rejected via 422.
 MAX_TEXT_BYTES = int(os.getenv("PF_MAX_TEXT_BYTES", str(MAX_UPLOAD_BYTES)))
+# Maximum concurrent inference jobs. Defaults to 2 — enough for one batch
+# in flight while another readies on CPU. For GPU set to 1; for fat CPUs
+# bump to physical-core-count via env.
+INFERENCE_CONCURRENCY = max(1, int(os.getenv("PF_INFERENCE_CONCURRENCY", "2")))
+
+# Process-wide readiness flag flipped by the lifespan handler. Liveness is
+# always true once the process answers; readiness only flips on after the
+# model is loaded so external orchestrators can route traffic correctly.
+_READY = False
 
 WEB_DIR = Path(__file__).parent / "web"
 
@@ -128,11 +141,37 @@ def _detect_cached(
     return spans, False
 
 
+_inference_semaphore: asyncio.Semaphore | None = None
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    # Pre-warm the model so the first request isn't slow.
-    get_filter(MODEL_NAME, DEVICE)
-    yield
+    """Pre-warm the model and set up bounded inference concurrency.
+
+    A1/A3: any failure here used to bring the process down with a stack
+    trace. We instead log the error and start the app in non-ready state
+    so the readiness probe (and any orchestrator gating on it) refuses
+    traffic. The liveness probe stays green because the process itself
+    is healthy — restarting won't help if the model can't be downloaded.
+    """
+    global _READY, _inference_semaphore
+    _inference_semaphore = asyncio.Semaphore(INFERENCE_CONCURRENCY)
+    try:
+        get_filter(MODEL_NAME, DEVICE)
+        _READY = True
+        logger.info(
+            "model loaded: %s on %s (concurrency=%d)",
+            MODEL_NAME, DEVICE or "auto", INFERENCE_CONCURRENCY,
+        )
+    except Exception:
+        _READY = False
+        # Log full traceback locally; details never leak to clients
+        # (see _pf and the readiness endpoint).
+        logger.exception("failed to load model %s", MODEL_NAME)
+    try:
+        yield
+    finally:
+        _READY = False
 
 
 app = FastAPI(
@@ -160,10 +199,50 @@ if WEB_DIR.is_dir():
 
 
 def _pf() -> PrivacyFilter:
+    """Fetch the singleton PrivacyFilter or surface a generic 503.
+
+    The lifespan handler pre-loads the model, so in the happy path this
+    just returns the cached instance. If lifespan failed, we return 503
+    (service unavailable) without leaking the underlying exception
+    message — HF errors can include disk paths, environment usernames
+    and even tokens. Full details land in the structured log instead.
+    """
     try:
         return get_filter(MODEL_NAME, DEVICE)
-    except Exception as exc:  # pragma: no cover - depends on env
-        raise HTTPException(status_code=500, detail=f"Failed to load model: {exc}") from exc
+    except Exception:  # pragma: no cover - depends on env
+        logger.exception("model load failed during request")
+        raise HTTPException(
+            status_code=503,
+            detail="Privacy Filter model is not available; check server logs.",
+        )
+
+
+async def _detect_cached_async(
+    pf: PrivacyFilter,
+    text: str,
+    min_score: float,
+    ru_postpass_on: bool,
+    ru_postpass_strict: bool,
+) -> tuple[list[Span], bool]:
+    """Run blocking detection in a worker thread under a bounded semaphore.
+
+    A2: sync endpoints used to dump unbounded inference jobs into the
+    default threadpool, where multiple CPU-bound calls would fight over
+    the GIL and the pipeline's own threads. The semaphore caps in-flight
+    inference at `PF_INFERENCE_CONCURRENCY` — cache hits still complete
+    immediately because we check the cache before acquiring a slot.
+    """
+    key = detect_cache_key(text, min_score, ru_postpass_on, ru_postpass_strict)
+    cached, hit = _detect_cache.get(key)
+    if hit:
+        return cached, True
+
+    assert _inference_semaphore is not None  # set in lifespan
+    async with _inference_semaphore:
+        spans, hit = await asyncio.to_thread(
+            _detect_cached, pf, text, min_score, ru_postpass_on, ru_postpass_strict
+        )
+    return spans, hit
 
 
 @app.get("/", include_in_schema=False)
@@ -179,14 +258,34 @@ def index() -> FileResponse:
 def health() -> dict[str, object]:
     stats = _detect_cache.stats()
     return {
-        "status": "ok",
+        "status": "ok" if _READY else "degraded",
+        "ready": _READY,
         "model": MODEL_NAME,
         "domain": DOMAIN,
         "cache_size": stats["size"],
         "cache_capacity": stats["capacity"],
         "cache_hits": stats["hits"],
         "cache_misses": stats["misses"],
+        "max_text_bytes": MAX_TEXT_BYTES,
+        "max_upload_bytes": MAX_UPLOAD_BYTES,
+        "inference_concurrency": INFERENCE_CONCURRENCY,
     }
+
+
+@app.get("/livez", include_in_schema=False)
+def livez() -> dict[str, str]:
+    """Liveness probe. The process answers, that's all this checks."""
+    return {"status": "ok"}
+
+
+@app.get("/readyz", include_in_schema=False)
+def readyz() -> dict[str, str]:
+    """Readiness probe. Flips green only after the model is loaded."""
+    if not _READY:
+        # 503 lets Kubernetes / Caddy keep this pod out of the rotation
+        # while the model is still warming up or after a load failure.
+        raise HTTPException(status_code=503, detail="model not ready")
+    return {"status": "ok"}
 
 
 @app.get("/samples")
@@ -195,9 +294,9 @@ def list_samples() -> dict[str, str]:
 
 
 @app.post("/detect", response_model=DetectResponse)
-def detect(req: DetectRequest) -> DetectResponse:
+async def detect(req: DetectRequest) -> DetectResponse:
     pf = _pf()
-    spans, cached = _detect_cached(
+    spans, cached = await _detect_cached_async(
         pf, req.text, req.min_score, req.ru_postpass, req.ru_postpass_strict
     )
     return DetectResponse(
@@ -208,9 +307,9 @@ def detect(req: DetectRequest) -> DetectResponse:
 
 
 @app.post("/redact", response_model=RedactResponse)
-def redact(req: RedactRequest) -> RedactResponse:
+async def redact(req: RedactRequest) -> RedactResponse:
     pf = _pf()
-    spans, cached = _detect_cached(
+    spans, cached = await _detect_cached_async(
         pf, req.text, req.min_score, req.ru_postpass, req.ru_postpass_strict
     )
     try:
@@ -221,8 +320,6 @@ def redact(req: RedactRequest) -> RedactResponse:
             mask_char=req.mask_char,
         )
     except ValueError as exc:
-        # PrivacyFilter.redact raises ValueError on bad mask_char; surface as
-        # 422 to keep validation contract uniform across routes.
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return RedactResponse(
         model=pf.model_name,
@@ -258,7 +355,7 @@ async def redact_file(
         raise HTTPException(status_code=422, detail="mask_char must be a single character")
 
     pf = _pf()
-    spans, cached = _detect_cached(
+    spans, cached = await _detect_cached_async(
         pf, text, min_score, ru_postpass, ru_postpass_strict
     )
     try:
