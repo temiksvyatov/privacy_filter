@@ -46,6 +46,12 @@ class DetectRequest(BaseModel):
         description="Run a Russian-targeted regex pass after the model "
                     "(passport / SNILS / INN / OGRN / RU phones, etc).",
     )
+    ru_postpass_strict: bool = Field(
+        default=False,
+        description="When true, the regex pass requires a Russian context "
+                    "keyword (ИНН/ОГРН/СНИЛС/паспорт) before bare numeric "
+                    "account numbers. Cuts false positives on noisy input.",
+    )
 
     @field_validator("text")
     @classmethod
@@ -103,15 +109,21 @@ _detect_cache: SpanListCache = SpanListCache(CACHE_SIZE)
 
 
 def _detect_cached(
-    pf: PrivacyFilter, text: str, min_score: float, ru_postpass_on: bool
+    pf: PrivacyFilter,
+    text: str,
+    min_score: float,
+    ru_postpass_on: bool,
+    ru_postpass_strict: bool = False,
 ) -> tuple[list[Span], bool]:
-    key = detect_cache_key(text, min_score, ru_postpass_on)
+    key = detect_cache_key(text, min_score, ru_postpass_on, ru_postpass_strict)
     cached, hit = _detect_cache.get(key)
     if hit:
         return cached, True
     spans = pf.detect(text, min_score=min_score)
     if ru_postpass_on:
-        spans = ru_postpass(text, spans)
+        spans = ru_postpass(text, spans, strict=ru_postpass_strict)
+        if min_score > 0:
+            spans = [s for s in spans if s.score >= min_score]
     _detect_cache.put(key, spans)
     return spans, False
 
@@ -185,7 +197,9 @@ def list_samples() -> dict[str, str]:
 @app.post("/detect", response_model=DetectResponse)
 def detect(req: DetectRequest) -> DetectResponse:
     pf = _pf()
-    spans, cached = _detect_cached(pf, req.text, req.min_score, req.ru_postpass)
+    spans, cached = _detect_cached(
+        pf, req.text, req.min_score, req.ru_postpass, req.ru_postpass_strict
+    )
     return DetectResponse(
         model=pf.model_name,
         spans=[SpanOut(**s.to_dict()) for s in spans],
@@ -196,7 +210,9 @@ def detect(req: DetectRequest) -> DetectResponse:
 @app.post("/redact", response_model=RedactResponse)
 def redact(req: RedactRequest) -> RedactResponse:
     pf = _pf()
-    spans, cached = _detect_cached(pf, req.text, req.min_score, req.ru_postpass)
+    spans, cached = _detect_cached(
+        pf, req.text, req.min_score, req.ru_postpass, req.ru_postpass_strict
+    )
     try:
         redacted = pf.redact(
             req.text,
@@ -223,6 +239,7 @@ async def redact_file(
     mask_char: str | None = Form(default=None),
     min_score: float = Form(default=0.0, ge=0.0, le=1.0),
     ru_postpass: bool = Form(default=False),
+    ru_postpass_strict: bool = Form(default=False),
 ) -> RedactResponse:
     """Multipart variant for `curl -F file=@notes.txt …` style usage."""
     raw = await file.read()
@@ -241,7 +258,9 @@ async def redact_file(
         raise HTTPException(status_code=422, detail="mask_char must be a single character")
 
     pf = _pf()
-    spans, cached = _detect_cached(pf, text, min_score, ru_postpass)
+    spans, cached = _detect_cached(
+        pf, text, min_score, ru_postpass, ru_postpass_strict
+    )
     try:
         redacted = pf.redact(text, placeholder=placeholder, spans=spans, mask_char=mask_char)
     except ValueError as exc:

@@ -85,3 +85,35 @@ hit/miss accounting, capacity validation, concurrent writers (8 threads
 
 Tests: added 3 cases for the module function and the enum string-equality
 contract. 42/42 green.
+
+### 5. `feat(postpass): strict mode + modern TLDs + union-regex`
+
+- **F1** (REVIEW §3.2): bare 10/12/13/15-digit numbers were unconditionally
+  flagged as `account_number`, which produces false positives on logs,
+  catalogues and barcodes. Added a **strict mode** (`strict=True` /
+  `--ru-postpass-strict` / `ru_postpass_strict: true`) that requires a
+  Russian context keyword (ИНН/ОГРН/ОГРНИП/СНИЛС/паспорт/INN/OGRN/…)
+  before the digits. Loose mode (default) is unchanged so existing
+  callers see no regression. The strict regex captures the keyword in
+  group 1 and the digits in group 2; `_match_bounds` slices out only
+  the digit range as the span, so `Span.text` matches the input.
+- **F2** (REVIEW §3.2): expanded the bare-host TLD allow-list. Added
+  modern gTLDs (`.app`, `.dev`, `.ai`, `.xyz`, `.tech`, `.cloud`,
+  `.site`, `.store`, `.page`, `.co`, `.me`, `.edu`, `.gov`), the
+  Cyrillic `.рус` and `.онлайн`, and CIS ccTLDs (`.by`, `.kz`, `.ua`,
+  `.uk`).
+- **P7** (REVIEW §2.2): consolidated the rule list. Each entity now
+  compiles into one alternation of patterns (`re.compile("|".join(...))`),
+  giving us one `re.finditer` pass per entity instead of one per
+  pattern. Same overlap semantics, fewer regex objects to walk.
+- **F5** (REVIEW §3.2): the CLI's `--min-score` was only applied inside
+  `pf.detect()`; regex hits skipped the gate, so a user asking for
+  `--min-score 0.99` unexpectedly got 0.95-scored regex spans. Drop
+  spans below `min_score` after the postpass too. The same fix lives in
+  the service's `_detect_cached` so all entry points behave the same.
+- Span text now equals an input substring even for strict-mode hits
+  (small but visible improvement for UI highlighting).
+
+Tests: added 8 cases (modern TLDs, Cyrillic TLDs, loose vs strict
+behaviour for bare numbers, strict-mode INN with context, span-text
+substring contract, service-level F5 + strict propagation). 51/51 green.

@@ -89,3 +89,59 @@ def test_postpass_skips_overlap_with_model():
     spans = ru_postpass(text, pre)
     accounts = [s for s in spans if s.entity == "account_number"]
     assert len(accounts) == 1
+
+
+def test_postpass_catches_modern_tlds():
+    text = "Visit demo.app, blog.dev, store.xyz, team.tech for details."
+    spans = ru_postpass(text, [])
+    urls = _by_entity(spans, "private_url")
+    assert any("demo.app" in u for u in urls)
+    assert any("blog.dev" in u for u in urls)
+    assert any("store.xyz" in u for u in urls)
+    assert any("team.tech" in u for u in urls)
+
+
+def test_postpass_catches_cyrillic_modern_tlds():
+    text = "Сайт сервис.рус и кабинет.онлайн"
+    spans = ru_postpass(text, [])
+    urls = _by_entity(spans, "private_url")
+    assert any("сервис.рус" in u for u in urls)
+    assert any("кабинет.онлайн" in u for u in urls)
+
+
+def test_postpass_loose_mode_flags_bare_13_digit():
+    # Default behaviour: a bare 13-digit blob is flagged as account_number,
+    # which is the right call for free-form prose.
+    text = "Reference 1234567890123 in the catalogue"
+    spans = ru_postpass(text, [])
+    assert any(s.entity == "account_number" for s in spans)
+
+
+def test_postpass_strict_mode_skips_bare_13_digit():
+    # Strict: same input, no context keyword -> no account_number span.
+    text = "Reference 1234567890123 in the catalogue"
+    spans = ru_postpass(text, [], strict=True)
+    assert not any(s.entity == "account_number" for s in spans)
+
+
+def test_postpass_strict_mode_keeps_inn_with_context():
+    text = "ИНН 770123456789 — действителен."
+    spans = ru_postpass(text, [], strict=True)
+    accounts = _by_entity(spans, "account_number")
+    # Span should be the digits only (the prefix is the regex capture group).
+    assert "770123456789" in accounts
+
+
+def test_postpass_strict_mode_passport_still_works():
+    # Passport's "1234 567890" pattern is unique enough that strict mode
+    # keeps detecting it without a keyword.
+    text = "1234 567890 issued in 2014"
+    spans = ru_postpass(text, [], strict=True)
+    assert any(s.entity == "account_number" for s in spans)
+
+
+def test_postpass_span_text_is_input_substring():
+    text = "ИНН 770123456789."
+    spans = ru_postpass(text, [], strict=True)
+    for s in spans:
+        assert s.text == text[s.start:s.end]

@@ -178,3 +178,31 @@ def test_redact_file_mask_char_too_long_returns_422(monkeypatch):
         data={"mask_char": "**"},
     )
     assert r.status_code == 422
+
+
+def test_postpass_min_score_filters_regex_hits(monkeypatch):
+    # F5: regex hits get a fixed score (~0.95). When the user asks for a
+    # higher threshold the service must drop them too.
+    _install_fake(monkeypatch)
+    client = TestClient(svc.app)
+    body = {
+        "text": "ИНН 770123456789",
+        "ru_postpass": True,
+        "min_score": 0.99,
+    }
+    r = client.post("/detect", json=body)
+    assert r.status_code == 200
+    assert r.json()["spans"] == []
+
+
+def test_postpass_strict_skips_bare_numbers_via_api(monkeypatch):
+    _install_fake(monkeypatch)
+    client = TestClient(svc.app)
+    body = {
+        "text": "Reference 1234567890123 in the catalogue",
+        "ru_postpass": True,
+        "ru_postpass_strict": True,
+    }
+    r = client.post("/detect", json=body)
+    assert r.status_code == 200
+    assert r.json()["spans"] == []

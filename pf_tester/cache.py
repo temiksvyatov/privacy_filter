@@ -31,7 +31,12 @@ from .filter import Span
 T = TypeVar("T")
 
 
-def detect_cache_key(text: str, min_score: float, ru_postpass_on: bool) -> str:
+def detect_cache_key(
+    text: str,
+    min_score: float,
+    ru_postpass_on: bool,
+    ru_postpass_strict: bool = False,
+) -> str:
     # Tagged concat avoids collisions where the boundary between fields could
     # be ambiguous; `\x1f` is ASCII Unit Separator, never appears in normal
     # input. We round min_score to 4 decimals so equivalent floats hash to the
@@ -39,7 +44,8 @@ def detect_cache_key(text: str, min_score: float, ru_postpass_on: bool) -> str:
     payload = (
         f"{text}\x1f"
         f"{round(min_score, 4):.4f}\x1f"
-        f"{int(bool(ru_postpass_on))}"
+        f"{int(bool(ru_postpass_on))}\x1f"
+        f"{int(bool(ru_postpass_strict))}"
     ).encode("utf-8")
     return hashlib.blake2b(payload, digest_size=16).hexdigest()
 

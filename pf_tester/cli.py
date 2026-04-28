@@ -58,6 +58,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Run the Russian regex post-pass after the model.",
     )
     p.add_argument(
+        "--ru-postpass-strict",
+        action="store_true",
+        help="In addition to --ru-postpass, require a Russian context "
+             "keyword (ИНН/ОГРН/СНИЛС/паспорт) before bare 10–15 digit "
+             "account numbers. Cuts false positives on logs and catalogues.",
+    )
+    p.add_argument(
         "--no-model",
         action="store_true",
         help="Skip the model entirely; rely on --ru-postpass only. "
@@ -71,6 +78,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         if args.mask_char and args.mask_char != "*":
             p.error("--stars conflicts with --mask-char")
         args.mask_char = "*"
+    if args.ru_postpass_strict and not (args.ru_postpass or args.no_model):
+        p.error("--ru-postpass-strict requires --ru-postpass (or --no-model)")
     return args
 
 
@@ -106,7 +115,12 @@ def _render_pretty(text: str, spans: Iterable[Span], redacted: str) -> None:
 def _detect(pf: PrivacyFilter | None, text: str, args: argparse.Namespace) -> list[Span]:
     spans = [] if pf is None else pf.detect(text, min_score=args.min_score)
     if args.ru_postpass or pf is None:
-        spans = ru_postpass_apply(text, spans)
+        spans = ru_postpass_apply(text, spans, strict=args.ru_postpass_strict)
+        # F5: regex hits get a fixed _REGEX_SCORE (0.95). If the user asked
+        # for a higher threshold than that, drop them too — otherwise the
+        # CLI silently kept regex spans below the model's min_score gate.
+        if args.min_score > 0:
+            spans = [s for s in spans if s.score >= args.min_score]
     return spans
 
 
