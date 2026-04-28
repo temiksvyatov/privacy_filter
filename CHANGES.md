@@ -151,3 +151,33 @@ substring contract, service-level F5 + strict propagation). 51/51 green.
 
 Tests: 5 new cases (livez, readyz×2, health limits, 503 leak guard).
 56/56 green.
+
+### 7. `feat(ui): server limits, AbortController, MIME guard, entity toggle`
+
+- **A5** (REVIEW §1.2): the file-size limit was hard-coded to `5 MB`
+  in JavaScript. If an operator bumped `PF_MAX_UPLOAD_BYTES`, the UI
+  would still refuse 6 MB files even though the API would accept them.
+  Now the UI reads `max_upload_bytes` and `max_text_bytes` from
+  `/health` and uses them — single source of truth.
+- **P10** (REVIEW §2.2): rapid-fire clicks on `Redact` queued one
+  request after another. Now the button keeps an `AbortController` for
+  the in-flight fetch and aborts it when a new run starts (or on
+  `Clear`). Aborted requests don't show errors; new ones replace them.
+- **F8** (REVIEW §3.2): drag&drop accepted any file, even binaries —
+  `readAsText` then filled the textarea with mojibake. Both paths
+  (file picker + drop) now validate by MIME (`text/*`) or extension
+  (`txt / md / log / csv / json / html / xml / yml / yaml`) before
+  reading, and report a useful error if the file is wrong.
+- **F9** (REVIEW §3.2): `loadSamples()` swallowed every error with
+  `catch { /* ignore */ }`, leaving the dropdown empty without
+  explanation. Now logs to console and surfaces the failure in the
+  status bar.
+- **F7** (REVIEW §3.2): the entity-name superscript on every PII
+  highlight made long texts unreadable. Added a header toggle (state
+  persists in `localStorage`); default is **off** (the title attribute
+  still carries the entity for tooltips). CSS gates the `::after`
+  pseudo-element behind `:root[data-show-entities="true"]`.
+- Added a UI checkbox for `ru_postpass_strict` that pairs with the
+  RU regex toggle, surfacing the new strict mode added in commit 5.
+- Cosmetics: human-readable byte formatting (`KB / MB`) in error
+  messages and the `filename` label.

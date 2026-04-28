@@ -13,6 +13,10 @@
       <p class="muted" id="meta">Loading…</p>
     </div>
     <div class="header-actions">
+      <button id="entity_toggle" type="button" class="ghost"
+              title="Toggle entity labels above highlighted PII" aria-pressed="true">
+        <span id="entity_icon">⌖</span>
+      </button>
       <button id="theme_toggle" type="button" class="ghost" title="Toggle theme" aria-label="Toggle theme">
         <span id="theme_icon">◐</span>
       </button>
@@ -50,6 +54,10 @@
 
         <label class="checkbox">
           <input id="ru_postpass" type="checkbox" checked /> RU regex post-pass
+        </label>
+        <label class="checkbox">
+          <input id="ru_postpass_strict" type="checkbox" />
+          Strict (require RU keyword)
         </label>
 
         <div class="spacer"></div>

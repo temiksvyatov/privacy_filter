@@ -174,7 +174,10 @@ button:disabled { opacity: 0.5; cursor: progress; }
   border-radius: 2px;
   padding: 0 1px;
 }
-.pii[data-entity]::after {
+/* F7: entity superscript is opt-in via the toggle button in the header.
+   Default off — large texts with dozens of PII spans become unreadable
+   when every span is followed by a small label. */
+:root[data-show-entities="true"] .pii[data-entity]::after {
   content: attr(data-entity);
   font-size: 10px;
   vertical-align: super;

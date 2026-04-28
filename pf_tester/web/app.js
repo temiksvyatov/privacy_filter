@@ -6,6 +6,7 @@
     modeValue: $("mode_value"),
     minScore: $("min_score"),
     ruPostpass: $("ru_postpass"),
+    ruPostpassStrict: $("ru_postpass_strict"),
     run: $("run"),
     detect: $("detect_only"),
     clear: $("clear"),
@@ -24,9 +25,25 @@
     downloadJson: $("download_json"),
     themeToggle: $("theme_toggle"),
     themeIcon: $("theme_icon"),
+    entityToggle: $("entity_toggle"),
+    entityIcon: $("entity_icon"),
   };
 
   let lastResult = { spans: [], redacted: "", input: "" };
+  // Server-reported limits with safe defaults until /health responds.
+  let limits = {
+    maxUploadBytes: 5 * 1024 * 1024,
+    maxTextBytes: 5 * 1024 * 1024,
+  };
+  // P10: lets us cancel the previous fetch when the user clicks Redact /
+  // Detect again before the prior request completes.
+  let inflight = null;
+
+  // F8: extensions accepted by the drop-zone. Mirror the file picker's
+  // `accept` attr so paste from disk and drag&drop behave identically.
+  const ALLOWED_EXTS = new Set([
+    "txt", "md", "log", "csv", "json", "html", "xml", "yml", "yaml",
+  ]);
 
   const escapeHtml = (s) =>
     s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -46,6 +63,7 @@
     const ms = parseFloat(els.minScore.value);
     if (!Number.isNaN(ms)) body.min_score = ms;
     body.ru_postpass = els.ruPostpass.checked;
+    body.ru_postpass_strict = els.ruPostpassStrict.checked;
     return body;
   };
 
@@ -100,11 +118,12 @@
     `).join("");
   };
 
-  const callApi = async (path, payload) => {
+  const callApi = async (path, payload, signal) => {
     const resp = await fetch(path, {
       method: "POST",
       headers: { "content-type": "application/json; charset=utf-8" },
       body: JSON.stringify(payload),
+      signal,
     });
     if (!resp.ok) {
       const detail = await resp.text();
@@ -113,18 +132,30 @@
     return resp.json();
   };
 
+  const formatBytes = (n) => {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  };
+
   const run = async (mode) => {
     const text = els.input.value;
     if (!text.trim()) {
       setStatus("Введите или выберите текст.", true);
       return;
     }
+    if (inflight) {
+      // P10: cancel the prior request rather than serialise it.
+      inflight.abort();
+    }
+    const controller = new AbortController();
+    inflight = controller;
     els.run.disabled = els.detect.disabled = true;
     setStatus("Working…");
     try {
       const t0 = performance.now();
       const path = mode === "redact" ? "/redact" : "/detect";
-      const data = await callApi(path, buildBody());
+      const data = await callApi(path, buildBody(), controller.signal);
       const dt = (performance.now() - t0).toFixed(0);
       const spans = data.spans || [];
       renderHighlight(text, spans);
@@ -134,8 +165,12 @@
       const cached = data.cached ? " · cached" : "";
       setStatus(`OK — ${spans.length} span(s) in ${dt} ms · model: ${data.model}${cached}`);
     } catch (e) {
+      if (e.name === "AbortError") {
+        return;
+      }
       setStatus(e.message, true);
     } finally {
+      if (inflight === controller) inflight = null;
       els.run.disabled = els.detect.disabled = false;
     }
   };
@@ -143,6 +178,7 @@
   const loadSamples = async () => {
     try {
       const resp = await fetch("/samples");
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
       for (const name of Object.keys(data)) {
         const opt = document.createElement("option");
@@ -157,8 +193,11 @@
           els.filename.textContent = `sample: ${name}`;
         }
       });
-    } catch {
-      /* ignore */
+    } catch (e) {
+      // F9: surface the failure instead of swallowing it. The samples
+      // dropdown stays empty and at least the user knows why.
+      console.warn("loadSamples failed:", e);
+      setStatus(`Could not load samples: ${e.message}`, true);
     }
   };
 
@@ -168,21 +207,55 @@
       const data = await resp.json();
       const dom = data.domain || location.host;
       els.meta.textContent = `Model: ${data.model} · ${dom}`;
+      // A5: read the limits from the server so the UI never disagrees
+      // with the API on what counts as "too big".
+      if (typeof data.max_upload_bytes === "number") {
+        limits.maxUploadBytes = data.max_upload_bytes;
+      }
+      if (typeof data.max_text_bytes === "number") {
+        limits.maxTextBytes = data.max_text_bytes;
+      }
     } catch {
       els.meta.textContent = "Service unreachable.";
     }
   };
 
+  const fileExt = (name) => {
+    const idx = name.lastIndexOf(".");
+    return idx < 0 ? "" : name.slice(idx + 1).toLowerCase();
+  };
+
+  const isAcceptedFile = (file) => {
+    if (!file) return false;
+    if (file.type && file.type.startsWith("text/")) return true;
+    return ALLOWED_EXTS.has(fileExt(file.name));
+  };
+
   const readFile = (file) => {
     if (!file) return;
-    if (file.size > 5 * 1024 * 1024) {
-      setStatus(`Файл слишком большой (${(file.size / 1024 / 1024).toFixed(1)} MB). Лимит 5 MB.`, true);
+    // F8: validate by MIME / extension before we try to read. The drop
+    // handler used to slurp anything (including binaries), then garble
+    // the input area with mojibake.
+    if (!isAcceptedFile(file)) {
+      setStatus(
+        `Unsupported file type: ${file.type || fileExt(file.name) || "?"}. ` +
+        `Accepted: ${[...ALLOWED_EXTS].join(", ")}, text/*.`,
+        true,
+      );
+      return;
+    }
+    if (file.size > limits.maxUploadBytes) {
+      setStatus(
+        `Файл слишком большой (${formatBytes(file.size)}). ` +
+        `Лимит ${formatBytes(limits.maxUploadBytes)}.`,
+        true,
+      );
       return;
     }
     const reader = new FileReader();
     reader.onload = () => {
       els.input.value = String(reader.result || "");
-      els.filename.textContent = `${file.name} · ${file.size} B`;
+      els.filename.textContent = `${file.name} · ${formatBytes(file.size)}`;
       els.sample.value = "";
       setStatus(`Loaded ${file.name}.`);
     };
@@ -219,9 +292,30 @@
     els.themeIcon.textContent = name === "light" ? "☀" : "☾";
   };
 
+  const setupEntityToggle = () => {
+    const stored = localStorage.getItem("pf-show-entities");
+    const initial = stored === null ? "false" : stored;
+    applyEntityVisibility(initial);
+    els.entityToggle.addEventListener("click", () => {
+      const next =
+        document.documentElement.dataset.showEntities === "true" ? "false" : "true";
+      applyEntityVisibility(next);
+      localStorage.setItem("pf-show-entities", next);
+    });
+  };
+
+  const applyEntityVisibility = (state) => {
+    document.documentElement.dataset.showEntities = state;
+    els.entityToggle.setAttribute("aria-pressed", state);
+    els.entityIcon.textContent = state === "true" ? "⌖" : "○";
+    els.entityToggle.title =
+      state === "true" ? "Hide entity labels" : "Show entity labels";
+  };
+
   els.run.addEventListener("click", () => run("redact"));
   els.detect.addEventListener("click", () => run("detect"));
   els.clear.addEventListener("click", () => {
+    if (inflight) inflight.abort();
     els.input.value = "";
     els.highlight.textContent = "";
     els.redacted.textContent = "";
@@ -279,6 +373,7 @@
   });
 
   setupTheme();
+  setupEntityToggle();
   onModeChange();
   loadSamples();
   loadHealth();
