@@ -20,6 +20,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .filter import DEFAULT_MODEL, PrivacyFilter, Span
+from .ru_postpass import ru_postpass as ru_postpass_apply
 from .samples import SAMPLES
 
 console = Console()
@@ -45,6 +46,24 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Shortcut for --mask-char '*'.",
     )
+    p.add_argument(
+        "--min-score",
+        type=float,
+        default=0.0,
+        help="Drop spans with confidence below this threshold (0..1).",
+    )
+    p.add_argument(
+        "--ru-postpass",
+        action="store_true",
+        help="Run the Russian regex post-pass after the model.",
+    )
+    p.add_argument(
+        "--no-model",
+        action="store_true",
+        help="Skip the model entirely; rely on --ru-postpass only. "
+             "Useful for debugging the regex layer or quick offline checks.",
+    )
+    p.add_argument("--num-threads", type=int, default=None, help="torch.set_num_threads")
     p.add_argument("--json", action="store_true", help="Emit JSON instead of pretty output.")
     p.add_argument("--suite", action="store_true", help="Run the built-in PII sample suite.")
     args = p.parse_args(argv)
@@ -84,15 +103,25 @@ def _render_pretty(text: str, spans: Iterable[Span], redacted: str) -> None:
     console.print(redacted)
 
 
+def _detect(pf: PrivacyFilter | None, text: str, args: argparse.Namespace) -> list[Span]:
+    spans = [] if pf is None else pf.detect(text, min_score=args.min_score)
+    if args.ru_postpass or pf is None:
+        spans = ru_postpass_apply(text, spans)
+    return spans
+
+
 def _run_one(
-    pf: PrivacyFilter,
+    pf: PrivacyFilter | None,
     text: str,
-    placeholder: str | None,
-    mask_char: str | None,
-    as_json: bool,
+    args: argparse.Namespace,
 ) -> None:
-    spans = pf.detect(text)
-    redacted = pf.redact(text, placeholder=placeholder, spans=spans, mask_char=mask_char)
+    placeholder = args.placeholder
+    mask_char = args.mask_char
+    as_json = args.json
+    spans = _detect(pf, text, args)
+    # We need a tiny adapter for redact() when running model-less.
+    redactor = pf if pf is not None else _RedactOnly()
+    redacted = redactor.redact(text, placeholder=placeholder, spans=spans, mask_char=mask_char)
     if as_json:
         print(json.dumps(
             {
@@ -107,16 +136,15 @@ def _run_one(
         _render_pretty(text, spans, redacted)
 
 
-def _run_suite(
-    pf: PrivacyFilter,
-    placeholder: str | None,
-    mask_char: str | None,
-    as_json: bool,
-) -> None:
+def _run_suite(pf: PrivacyFilter | None, args: argparse.Namespace) -> None:
+    placeholder = args.placeholder
+    mask_char = args.mask_char
+    as_json = args.json
     results = []
+    redactor = pf if pf is not None else _RedactOnly()
     for name, text in SAMPLES.items():
-        spans = pf.detect(text)
-        redacted = pf.redact(text, placeholder=placeholder, spans=spans, mask_char=mask_char)
+        spans = _detect(pf, text, args)
+        redacted = redactor.redact(text, placeholder=placeholder, spans=spans, mask_char=mask_char)
         if as_json:
             results.append({
                 "name": name,
@@ -131,16 +159,35 @@ def _run_suite(
         print(json.dumps(results, ensure_ascii=False, indent=2))
 
 
+class _RedactOnly:
+    """Minimal stand-in that only does redaction (no model)."""
+    def redact(self, text, placeholder=None, spans=None, mask_char=None):
+        return PrivacyFilter.redact(self, text, placeholder=placeholder,
+                                    spans=spans, mask_char=mask_char)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    pf = PrivacyFilter(model_name=args.model, device=args.device)
+    pf: PrivacyFilter | None
+    if args.no_model:
+        if not args.ru_postpass:
+            print("--no-model requires --ru-postpass (otherwise nothing is detected).",
+                  file=sys.stderr)
+            return 2
+        pf = None
+    else:
+        pf = PrivacyFilter(
+            model_name=args.model,
+            device=args.device,
+            num_threads=args.num_threads,
+        )
 
     if args.suite:
-        _run_suite(pf, args.placeholder, args.mask_char, args.json)
+        _run_suite(pf, args)
         return 0
 
     text = _read_input(args)
-    _run_one(pf, text, args.placeholder, args.mask_char, args.json)
+    _run_one(pf, text, args)
     return 0
 
 
