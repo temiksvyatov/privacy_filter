@@ -49,6 +49,15 @@ python -m pf_tester.cli --stars "Call Alice at +1 415 555 0142"
 
 # любой другой символ-маска
 python -m pf_tester.cli --mask-char "#" "Call Alice"
+
+# фильтр по уверенности (0..1)
+python -m pf_tester.cli --min-score 0.85 -f notes.txt
+
+# Russian regex post-pass (паспорт, СНИЛС, ИНН, ОГРН, +7, .рф, …)
+python -m pf_tester.cli --ru-postpass --stars -f sample_ru.txt
+
+# offline-проверка одной regex-составляющей (без модели)
+python -m pf_tester.cli --no-model --ru-postpass "ИНН 770123456789, +7 495 123-45-67"
 ```
 
 Вывод по умолчанию — таблица `rich` с найденными спанами + редактированный
@@ -62,12 +71,18 @@ uvicorn pf_tester.service:app --reload --port 8000
 
 Эндпоинты:
 
-| метод | путь        | описание                                       |
-|-------|-------------|------------------------------------------------|
-| GET   | `/health`   | health-check + имя модели                      |
-| GET   | `/samples`  | словарь встроенных тестовых текстов            |
-| POST  | `/detect`   | вернёт массив спанов с координатами и скором   |
-| POST  | `/redact`   | вернёт спаны и текст с заменой PII             |
+| метод | путь             | описание                                                  |
+|-------|------------------|-----------------------------------------------------------|
+| GET   | `/`              | встроенный SPA-UI                                         |
+| GET   | `/health`        | health-check + имя модели + статистика кэша               |
+| GET   | `/samples`       | словарь встроенных тестовых текстов                       |
+| POST  | `/detect`        | спаны с координатами и скором                             |
+| POST  | `/redact`        | спаны + текст с заменой PII                               |
+| POST  | `/redact/file`   | multipart upload, удобно для больших файлов через `curl`  |
+
+Все JSON-эндпоинты принимают необязательные `min_score` (0..1) и
+`ru_postpass` (bool). `/redact` дополнительно — `placeholder` и
+`mask_char` (одиночный символ).
 
 Пример:
 
@@ -91,6 +106,16 @@ curl -s localhost:8000/redact \
   -d '{"text":"Иванов Иван, +7 495 123-45-67","mask_char":"*"}' \
   | jq -r '.redacted'
 # *********** **, ****************
+```
+
+Multipart-загрузка файла (большие файлы или просто чтобы не эскейпить JSON):
+
+```bash
+curl -s localhost:8000/redact/file \
+  -F file=@sample_ru.txt \
+  -F mask_char='*' \
+  -F ru_postpass=true \
+  | jq -r '.redacted'
 ```
 
 Конфиг через переменные окружения:
@@ -171,6 +196,62 @@ pytest -q
 Тесты не дёргают модель: редактор замокан, сервис прогоняется через
 `fastapi.testclient`. Это smoke-проверки логики, а не качества модели.
 
+## Производительность
+
+- Внутренний кэш ответов модели (LRU по `sha256(text + min_score + ru_postpass)`).
+  Размер настраивается через `PF_CACHE_SIZE` (по умолчанию 256). Видно
+  в `/health` и в баннере UI как `cached`.
+- `torch.inference_mode()` + `model.eval()` уменьшают накладные расходы
+  относительно дефолтного режима пайплайна.
+- `PF_NUM_THREADS=N` — выставит `torch.set_num_threads(N)`. На
+  многоядерных CPU обычно имеет смысл выставить число физических ядер.
+- Батч-инференс для нескольких текстов:
+
+  ```python
+  from pf_tester.filter import PrivacyFilter
+  pf = PrivacyFilter()
+  results = pf.detect_batch(["text 1", "text 2", "text 3"], batch_size=8)
+  ```
+
+- Бенчмарк-команда:
+
+  ```bash
+  python -m pf_tester.bench --runs 5
+  python -m pf_tester.bench --device cpu --batch-size 4 --num-threads 8
+  ```
+
+  Печатает `chars/s` throughput и p50/p90/p99 латентность по документу.
+
+## Русский язык
+
+Privacy Filter обучался преимущественно на английском; на русском
+recall заметно хуже, особенно по идентификаторам (паспорт, СНИЛС, ИНН,
+ОГРН) и по нестандартным форматам телефонов. Чтобы закрыть этот
+разрыв, есть `ru_postpass` — детерминированный regex-слой, который
+запускается **после** модели и добавляет недостающие спаны без
+дублирования того, что уже нашла модель.
+
+Что ловит:
+
+| Категория          | Что покрывает                                                  |
+|--------------------|----------------------------------------------------------------|
+| `account_number`   | Паспорт РФ, СНИЛС, ИНН (10/12), ОГРН (13/15), банк. карты, IBAN |
+| `private_phone`    | `+7`/`8` форматы с любыми разделителями                         |
+| `private_email`    | Кириллический local part и домен                                |
+| `private_url`      | Кириллические TLD (`.рф`, `.москва`)                            |
+| `private_date`     | `DD.MM.YYYY`, `12 января 2025 г.`                               |
+| `secret`           | `sk-…`, `AKIA…`, `ghp_…`, GitHub PAT                            |
+
+Включается флагом:
+
+- CLI: `--ru-postpass`
+- API: `"ru_postpass": true` в теле `/detect` и `/redact`
+- UI: галочка «RU regex post-pass» (включена по умолчанию)
+
+Имена ФИО на русском оставлены модели — regex по русским склонениям
+даёт слишком много false positives. Если recall по именам критичен —
+дальше уже файнтюн через официальный `opf train` на своих данных.
+
 ## Что стоит проверить руками
 
 - **Code-блоки с секретами**: пасворды, API-ключи, JWT.
@@ -185,11 +266,15 @@ pytest -q
 
 ```
 pf_tester/
-  filter.py     # обёртка над transformers pipeline + редактор
-  cli.py        # CLI: inline / file / stdin / suite
-  service.py    # FastAPI: /health, /samples, /detect, /redact
-  samples.py    # 8 готовых тест-текстов (по одному на категорию + edge cases)
+  filter.py        # transformers pipeline + redact() + detect_batch()
+  ru_postpass.py   # regex-слой под российские реалии
+  cli.py           # CLI: inline / file / stdin / --suite / --no-model
+  bench.py         # throughput + p50/p90/p99 латентность
+  service.py       # FastAPI: SPA UI + JSON + multipart endpoints
+  samples.py       # тестовые тексты (en + ru)
+  web/             # ванильный SPA (HTML/CSS/JS) с light/dark темой
 tests/
-  test_redaction.py  # юнит-тесты редактора (без модели)
-  test_service.py    # smoke-тесты HTTP с замоканной моделью
+  test_redaction.py    # юнит-тесты редактора
+  test_ru_postpass.py  # юнит-тесты regex-слоя
+  test_service.py      # smoke-тесты HTTP с замоканной моделью
 ```
