@@ -1,6 +1,6 @@
 """Pure unit tests for the redaction helper that don't load the real model."""
 
-from pf_tester.filter import PrivacyFilter, Span
+from pf_tester.filter import Entity, PrivacyFilter, Span, redact
 
 
 class _Stub(PrivacyFilter):
@@ -65,3 +65,20 @@ def test_redact_mask_char_must_be_single_char():
     import pytest
     with pytest.raises(ValueError):
         pf.redact("abc", spans=[Span("x", "abc", 0, 3, 0.9)], mask_char="**")
+
+
+def test_module_level_redact_does_not_need_filter():
+    text = "hi Alice"
+    spans = [Span(entity="private_person", text="Alice", start=3, end=8, score=0.9)]
+    assert redact(text, spans, placeholder="[X]") == "hi [X]"
+
+
+def test_module_level_redact_default_tag():
+    text = "hi Alice"
+    spans = [Span(entity=Entity.PRIVATE_PERSON, text="Alice", start=3, end=8, score=0.9)]
+    assert redact(text, spans) == "hi [PRIVATE_PERSON]"
+
+
+def test_entity_enum_values_match_strings():
+    assert Entity.PRIVATE_EMAIL == "private_email"
+    assert str(Entity.SECRET) == "secret"

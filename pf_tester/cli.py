@@ -19,7 +19,7 @@ from typing import Iterable
 from rich.console import Console
 from rich.table import Table
 
-from .filter import DEFAULT_MODEL, PrivacyFilter, Span
+from .filter import DEFAULT_MODEL, PrivacyFilter, Span, redact as redact_text
 from .ru_postpass import ru_postpass as ru_postpass_apply
 from .samples import SAMPLES
 
@@ -119,9 +119,7 @@ def _run_one(
     mask_char = args.mask_char
     as_json = args.json
     spans = _detect(pf, text, args)
-    # We need a tiny adapter for redact() when running model-less.
-    redactor = pf if pf is not None else _RedactOnly()
-    redacted = redactor.redact(text, placeholder=placeholder, spans=spans, mask_char=mask_char)
+    redacted = redact_text(text, spans, placeholder=placeholder, mask_char=mask_char)
     if as_json:
         print(json.dumps(
             {
@@ -141,10 +139,9 @@ def _run_suite(pf: PrivacyFilter | None, args: argparse.Namespace) -> None:
     mask_char = args.mask_char
     as_json = args.json
     results = []
-    redactor = pf if pf is not None else _RedactOnly()
     for name, text in SAMPLES.items():
         spans = _detect(pf, text, args)
-        redacted = redactor.redact(text, placeholder=placeholder, spans=spans, mask_char=mask_char)
+        redacted = redact_text(text, spans, placeholder=placeholder, mask_char=mask_char)
         if as_json:
             results.append({
                 "name": name,
@@ -157,13 +154,6 @@ def _run_suite(pf: PrivacyFilter | None, args: argparse.Namespace) -> None:
             _render_pretty(text, spans, redacted)
     if as_json:
         print(json.dumps(results, ensure_ascii=False, indent=2))
-
-
-class _RedactOnly:
-    """Minimal stand-in that only does redaction (no model)."""
-    def redact(self, text, placeholder=None, spans=None, mask_char=None):
-        return PrivacyFilter.redact(self, text, placeholder=placeholder,
-                                    spans=spans, mask_char=mask_char)
 
 
 def main(argv: list[str] | None = None) -> int:

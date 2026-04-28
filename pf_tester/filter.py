@@ -5,10 +5,30 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 from dataclasses import dataclass, asdict
+from enum import StrEnum
 from functools import lru_cache
 from typing import Iterable, Iterator
 
 DEFAULT_MODEL = "openai/privacy-filter"
+
+
+class Entity(StrEnum):
+    """Single source of truth for the model's PII taxonomy.
+
+    The HF model emits entity strings; we accept and re-emit them as plain
+    `str`. Keeping the enum here means CLI / service / regex postpass /
+    tests can all reference the same names without scattering string
+    literals across the codebase.
+    """
+
+    ACCOUNT_NUMBER = "account_number"
+    PRIVATE_ADDRESS = "private_address"
+    PRIVATE_DATE = "private_date"
+    PRIVATE_EMAIL = "private_email"
+    PRIVATE_PERSON = "private_person"
+    PRIVATE_PHONE = "private_phone"
+    PRIVATE_URL = "private_url"
+    SECRET = "secret"
 
 
 @dataclass(frozen=True)
@@ -122,36 +142,51 @@ class PrivacyFilter:
         spans: Iterable[Span] | None = None,
         mask_char: str | None = None,
     ) -> str:
-        """Replace detected PII spans.
+        """Replace detected PII spans. See :func:`redact` for semantics."""
+        if spans is None:
+            spans = self.detect(text)
+        return redact(text, spans, placeholder=placeholder, mask_char=mask_char)
 
-        Precedence:
-          1. `mask_char` — repeat the char for the full span length
-             (e.g. "Иванов" -> "******"). Handy for sanitizing logs while
-             preserving layout.
-          2. `placeholder` — replace each span with this exact string.
-          3. default — typed tag like `[PRIVATE_PERSON]`.
-        """
-        spans = list(spans) if spans is not None else self.detect(text)
-        if not spans:
-            return text
-        if mask_char is not None and len(mask_char) != 1:
-            raise ValueError("mask_char must be a single character")
-        ordered = sorted(spans, key=lambda s: s.start)
-        out: list[str] = []
-        cursor = 0
-        for s in ordered:
-            if s.start < cursor:
-                continue
-            out.append(text[cursor:s.start])
-            if mask_char is not None:
-                out.append(mask_char * (s.end - s.start))
-            elif placeholder is not None:
-                out.append(placeholder)
-            else:
-                out.append(f"[{s.entity.upper()}]")
-            cursor = s.end
-        out.append(text[cursor:])
-        return "".join(out)
+
+def redact(
+    text: str,
+    spans: Iterable[Span],
+    placeholder: str | None = None,
+    mask_char: str | None = None,
+) -> str:
+    """Replace detected PII spans in `text`.
+
+    Precedence (first non-`None` wins):
+      1. ``mask_char`` — repeat the char for the full span length
+         (e.g. ``"Иванов" -> "******"``). Useful for sanitizing logs
+         while preserving column layout.
+      2. ``placeholder`` — replace each span with this exact string.
+      3. default — typed tag like ``[PRIVATE_PERSON]``.
+
+    Pure function so we can use it without instantiating the model
+    (regex-only / `--no-model` mode in the CLI).
+    """
+    span_list = list(spans)
+    if not span_list:
+        return text
+    if mask_char is not None and len(mask_char) != 1:
+        raise ValueError("mask_char must be a single character")
+    ordered = sorted(span_list, key=lambda s: s.start)
+    out: list[str] = []
+    cursor = 0
+    for s in ordered:
+        if s.start < cursor:
+            continue
+        out.append(text[cursor:s.start])
+        if mask_char is not None:
+            out.append(mask_char * (s.end - s.start))
+        elif placeholder is not None:
+            out.append(placeholder)
+        else:
+            out.append(f"[{s.entity.upper()}]")
+        cursor = s.end
+    out.append(text[cursor:])
+    return "".join(out)
 
 
 @lru_cache(maxsize=2)

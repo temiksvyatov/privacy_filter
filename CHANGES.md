@@ -66,3 +66,22 @@ Tests: added 3 cases (`oversized_text`, `mask_char_too_long` ×2). 30/30 green.
 Tests: added `tests/test_cache.py` with 9 cases covering LRU semantics,
 hit/miss accounting, capacity validation, concurrent writers (8 threads
 × 2000 ops) and key derivation properties. 39/39 green.
+
+### 4. `refactor(filter): module-level redact + Entity enum`
+
+- **A6** (REVIEW §1.2): introduced `class Entity(StrEnum)` with the eight
+  PII categories the model emits. Single source of truth for taxonomy
+  references in CLI / service / regex postpass / tests. Adding a 9th
+  category is now a one-line change instead of touching 4 files.
+- **Q2** (REVIEW §5): `_RedactOnly` was a hack — a stand-in object that
+  invoked `PrivacyFilter.redact(self, …)` as an unbound method to get
+  redaction without loading the model. Worked because `redact()` didn't
+  touch `self`, but it was fragile (any future `self.something` would
+  break it silently). Extracted the algorithm into a module-level
+  `redact(text, spans, placeholder, mask_char)` function. The class
+  method is now a one-line delegator that auto-runs `detect()` if spans
+  aren't provided. CLI imports the module function directly and the
+  hack is gone.
+
+Tests: added 3 cases for the module function and the enum string-equality
+contract. 42/42 green.
