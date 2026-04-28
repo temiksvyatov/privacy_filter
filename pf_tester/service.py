@@ -18,7 +18,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .filter import DEFAULT_MODEL, PrivacyFilter, Span, get_filter
 from .ru_postpass import ru_postpass
@@ -29,6 +29,8 @@ DEVICE = os.getenv("PF_DEVICE")  # e.g. "cpu", "cuda", "cuda:0"
 DOMAIN = os.getenv("DOMAIN", "").strip()
 CACHE_SIZE = int(os.getenv("PF_CACHE_SIZE", "256"))
 MAX_UPLOAD_BYTES = int(os.getenv("PF_MAX_UPLOAD_BYTES", str(5 * 1024 * 1024)))
+# Hard cap on JSON-body text to mirror the upload limit; rejected via 422.
+MAX_TEXT_BYTES = int(os.getenv("PF_MAX_TEXT_BYTES", str(MAX_UPLOAD_BYTES)))
 
 WEB_DIR = Path(__file__).parent / "web"
 
@@ -46,6 +48,16 @@ class DetectRequest(BaseModel):
         description="Run a Russian-targeted regex pass after the model "
                     "(passport / SNILS / INN / OGRN / RU phones, etc).",
     )
+
+    @field_validator("text")
+    @classmethod
+    def _text_size(cls, v: str) -> str:
+        # Pydantic max_length counts characters, not bytes; we want bytes so
+        # the limit aligns with /redact/file's MAX_UPLOAD_BYTES (multibyte
+        # cyrillic input pays its real cost). 422 from the validator.
+        if len(v.encode("utf-8")) > MAX_TEXT_BYTES:
+            raise ValueError(f"text exceeds {MAX_TEXT_BYTES} bytes")
+        return v
 
 
 class RedactRequest(DetectRequest):
@@ -195,12 +207,17 @@ def detect(req: DetectRequest) -> DetectResponse:
 def redact(req: RedactRequest) -> RedactResponse:
     pf = _pf()
     spans, cached = _detect_cached(pf, req.text, req.min_score, req.ru_postpass)
-    redacted = pf.redact(
-        req.text,
-        placeholder=req.placeholder,
-        spans=spans,
-        mask_char=req.mask_char,
-    )
+    try:
+        redacted = pf.redact(
+            req.text,
+            placeholder=req.placeholder,
+            spans=spans,
+            mask_char=req.mask_char,
+        )
+    except ValueError as exc:
+        # PrivacyFilter.redact raises ValueError on bad mask_char; surface as
+        # 422 to keep validation contract uniform across routes.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return RedactResponse(
         model=pf.model_name,
         redacted=redacted,
@@ -214,7 +231,7 @@ async def redact_file(
     file: UploadFile = File(...),
     placeholder: str | None = Form(default=None),
     mask_char: str | None = Form(default=None),
-    min_score: float = Form(default=0.0),
+    min_score: float = Form(default=0.0, ge=0.0, le=1.0),
     ru_postpass: bool = Form(default=False),
 ) -> RedactResponse:
     """Multipart variant for `curl -F file=@notes.txt …` style usage."""
@@ -229,11 +246,16 @@ async def redact_file(
     except UnicodeDecodeError as exc:
         raise HTTPException(status_code=400, detail=f"Not UTF-8: {exc}") from exc
     if mask_char is not None and len(mask_char) != 1:
-        raise HTTPException(status_code=400, detail="mask_char must be a single character")
+        # Mirror the pydantic validator on RedactRequest.mask_char so the
+        # multipart route reports the same 422 contract as the JSON route.
+        raise HTTPException(status_code=422, detail="mask_char must be a single character")
 
     pf = _pf()
     spans, cached = _detect_cached(pf, text, min_score, ru_postpass)
-    redacted = pf.redact(text, placeholder=placeholder, spans=spans, mask_char=mask_char)
+    try:
+        redacted = pf.redact(text, placeholder=placeholder, spans=spans, mask_char=mask_char)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return RedactResponse(
         model=pf.model_name,
         redacted=redacted,

@@ -148,3 +148,33 @@ def test_min_score_filters(monkeypatch):
     )
     assert r.status_code == 200
     assert r.json()["spans"] == []
+
+
+def test_detect_rejects_oversized_text(monkeypatch):
+    _install_fake(monkeypatch)
+    monkeypatch.setattr(svc, "MAX_TEXT_BYTES", 16)
+    client = TestClient(svc.app)
+    r = client.post("/detect", json={"text": "x" * 64})
+    assert r.status_code == 422
+
+
+def test_redact_mask_char_too_long_returns_422(monkeypatch):
+    _install_fake(monkeypatch)
+    client = TestClient(svc.app)
+    r = client.post(
+        "/redact",
+        json={"text": "ping alice@example.com please", "mask_char": "**"},
+    )
+    assert r.status_code == 422
+
+
+def test_redact_file_mask_char_too_long_returns_422(monkeypatch):
+    _install_fake(monkeypatch)
+    client = TestClient(svc.app)
+    payload = "ping alice@example.com please".encode("utf-8")
+    r = client.post(
+        "/redact/file",
+        files={"file": ("notes.txt", payload, "text/plain")},
+        data={"mask_char": "**"},
+    )
+    assert r.status_code == 422
