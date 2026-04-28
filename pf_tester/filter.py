@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import os
+from contextlib import contextmanager
 from dataclasses import dataclass, asdict
 from functools import lru_cache
-from typing import Iterable
+from typing import Iterable, Iterator
 
 DEFAULT_MODEL = "openai/privacy-filter"
 
@@ -29,8 +31,11 @@ class PrivacyFilter:
         model_name: str = DEFAULT_MODEL,
         device: str | int | None = None,
         aggregation_strategy: str = "simple",
+        num_threads: int | None = None,
     ) -> None:
         from transformers import pipeline
+
+        self._tune_torch(num_threads)
 
         self.model_name = model_name
         self.aggregation_strategy = aggregation_strategy
@@ -40,11 +45,39 @@ class PrivacyFilter:
             aggregation_strategy=aggregation_strategy,
             device=device,
         )
+        # Make sure we never accumulate gradients or run dropout.
+        try:
+            self._pipe.model.eval()
+        except AttributeError:
+            pass
+
+    @staticmethod
+    def _tune_torch(num_threads: int | None) -> None:
+        try:
+            import torch
+        except ImportError:
+            return
+        n = num_threads if num_threads is not None else int(os.getenv("PF_NUM_THREADS", "0"))
+        if n > 0:
+            torch.set_num_threads(n)
+
+    @staticmethod
+    @contextmanager
+    def _no_grad() -> Iterator[None]:
+        try:
+            import torch
+        except ImportError:
+            yield
+            return
+        # `inference_mode` is a stricter, faster superset of `no_grad`.
+        with torch.inference_mode():
+            yield
 
     def detect(self, text: str, min_score: float = 0.0) -> list[Span]:
         if not text:
             return []
-        raw = self._pipe(text)
+        with self._no_grad():
+            raw = self._pipe(text)
         spans: list[Span] = []
         for item in raw:
             entity = item.get("entity_group") or item.get("entity") or "UNKNOWN"
@@ -61,6 +94,34 @@ class PrivacyFilter:
                 )
             )
         return spans
+
+    def detect_batch(
+        self, texts: list[str], min_score: float = 0.0, batch_size: int = 8
+    ) -> list[list[Span]]:
+        """Run inference on multiple texts in one forward pass per batch."""
+        if not texts:
+            return []
+        with self._no_grad():
+            raw_all = self._pipe(texts, batch_size=batch_size)
+        out: list[list[Span]] = []
+        for raw in raw_all:
+            spans: list[Span] = []
+            for item in raw:
+                entity = item.get("entity_group") or item.get("entity") or "UNKNOWN"
+                score = float(item["score"])
+                if score < min_score:
+                    continue
+                spans.append(
+                    Span(
+                        entity=entity,
+                        text=item["word"],
+                        start=int(item["start"]),
+                        end=int(item["end"]),
+                        score=score,
+                    )
+                )
+            out.append(spans)
+        return out
 
     def redact(
         self,
