@@ -73,27 +73,37 @@ class PrivacyFilter:
         with torch.inference_mode():
             yield
 
-    def detect(self, text: str, min_score: float = 0.0) -> list[Span]:
-        if not text:
-            return []
-        with self._no_grad():
-            raw = self._pipe(text)
+    @staticmethod
+    def _raw_to_spans(text: str, raw: Iterable[dict], min_score: float) -> list[Span]:
+        # NB: HF token-classification with simple aggregation may emit `word`
+        # with sub-token markers (e.g. "##") or leading whitespace depending
+        # on the tokenizer. We slice the original text by [start:end] to keep
+        # span.text exactly equal to the input substring.
         spans: list[Span] = []
         for item in raw:
             entity = item.get("entity_group") or item.get("entity") or "UNKNOWN"
             score = float(item["score"])
             if score < min_score:
                 continue
+            start = int(item["start"])
+            end = int(item["end"])
             spans.append(
                 Span(
                     entity=entity,
-                    text=item["word"],
-                    start=int(item["start"]),
-                    end=int(item["end"]),
+                    text=text[start:end],
+                    start=start,
+                    end=end,
                     score=score,
                 )
             )
         return spans
+
+    def detect(self, text: str, min_score: float = 0.0) -> list[Span]:
+        if not text:
+            return []
+        with self._no_grad():
+            raw = self._pipe(text)
+        return self._raw_to_spans(text, raw, min_score)
 
     def detect_batch(
         self, texts: list[str], min_score: float = 0.0, batch_size: int = 8
@@ -103,25 +113,7 @@ class PrivacyFilter:
             return []
         with self._no_grad():
             raw_all = self._pipe(texts, batch_size=batch_size)
-        out: list[list[Span]] = []
-        for raw in raw_all:
-            spans: list[Span] = []
-            for item in raw:
-                entity = item.get("entity_group") or item.get("entity") or "UNKNOWN"
-                score = float(item["score"])
-                if score < min_score:
-                    continue
-                spans.append(
-                    Span(
-                        entity=entity,
-                        text=item["word"],
-                        start=int(item["start"]),
-                        end=int(item["end"]),
-                        score=score,
-                    )
-                )
-            out.append(spans)
-        return out
+        return [self._raw_to_spans(t, raw, min_score) for t, raw in zip(texts, raw_all)]
 
     def redact(
         self,
