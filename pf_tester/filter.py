@@ -41,20 +41,23 @@ class PrivacyFilter:
             device=device,
         )
 
-    def detect(self, text: str) -> list[Span]:
+    def detect(self, text: str, min_score: float = 0.0) -> list[Span]:
         if not text:
             return []
         raw = self._pipe(text)
         spans: list[Span] = []
         for item in raw:
             entity = item.get("entity_group") or item.get("entity") or "UNKNOWN"
+            score = float(item["score"])
+            if score < min_score:
+                continue
             spans.append(
                 Span(
                     entity=entity,
                     text=item["word"],
                     start=int(item["start"]),
                     end=int(item["end"]),
-                    score=float(item["score"]),
+                    score=score,
                 )
             )
         return spans

@@ -4,6 +4,8 @@
     input: $("input"),
     mode: $("mode"),
     modeValue: $("mode_value"),
+    minScore: $("min_score"),
+    ruPostpass: $("ru_postpass"),
     run: $("run"),
     detect: $("detect_only"),
     clear: $("clear"),
@@ -13,7 +15,18 @@
     sample: $("sample"),
     spansBody: document.querySelector("#spans tbody"),
     meta: $("meta"),
+    upload: $("upload"),
+    uploadBtn: $("upload_btn"),
+    filename: $("filename"),
+    dropzone: $("dropzone"),
+    copyRedacted: $("copy_redacted"),
+    downloadTxt: $("download_txt"),
+    downloadJson: $("download_json"),
+    themeToggle: $("theme_toggle"),
+    themeIcon: $("theme_icon"),
   };
+
+  let lastResult = { spans: [], redacted: "", input: "" };
 
   const escapeHtml = (s) =>
     s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -30,6 +43,9 @@
     const v = els.modeValue.value;
     if (mode === "placeholder" && v) body.placeholder = v;
     if (mode === "mask_char" && v) body.mask_char = v.charAt(0);
+    const ms = parseFloat(els.minScore.value);
+    if (!Number.isNaN(ms)) body.min_score = ms;
+    body.ru_postpass = els.ruPostpass.checked;
     return body;
   };
 
@@ -114,7 +130,9 @@
       renderHighlight(text, spans);
       renderSpans(spans);
       els.redacted.textContent = data.redacted ?? "(detect-only mode)";
-      setStatus(`OK — ${spans.length} span(s) in ${dt} ms · model: ${data.model}`);
+      lastResult = { spans, redacted: data.redacted ?? "", input: text };
+      const cached = data.cached ? " · cached" : "";
+      setStatus(`OK — ${spans.length} span(s) in ${dt} ms · model: ${data.model}${cached}`);
     } catch (e) {
       setStatus(e.message, true);
     } finally {
@@ -134,7 +152,10 @@
       }
       els.sample.addEventListener("change", () => {
         const name = els.sample.value;
-        if (name && data[name]) els.input.value = data[name];
+        if (name && data[name]) {
+          els.input.value = data[name];
+          els.filename.textContent = `sample: ${name}`;
+        }
       });
     } catch {
       /* ignore */
@@ -145,10 +166,57 @@
     try {
       const resp = await fetch("/health");
       const data = await resp.json();
-      els.meta.textContent = `Model: ${data.model} · Domain: ${location.host}`;
+      const dom = data.domain || location.host;
+      els.meta.textContent = `Model: ${data.model} · ${dom}`;
     } catch {
       els.meta.textContent = "Service unreachable.";
     }
+  };
+
+  const readFile = (file) => {
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) {
+      setStatus(`Файл слишком большой (${(file.size / 1024 / 1024).toFixed(1)} MB). Лимит 5 MB.`, true);
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      els.input.value = String(reader.result || "");
+      els.filename.textContent = `${file.name} · ${file.size} B`;
+      els.sample.value = "";
+      setStatus(`Loaded ${file.name}.`);
+    };
+    reader.onerror = () => setStatus(`Не удалось прочитать файл: ${reader.error}`, true);
+    reader.readAsText(file, "utf-8");
+  };
+
+  const downloadBlob = (filename, mime, content) => {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const setupTheme = () => {
+    const stored = localStorage.getItem("pf-theme");
+    const prefersLight = window.matchMedia("(prefers-color-scheme: light)").matches;
+    const initial = stored || (prefersLight ? "light" : "dark");
+    applyTheme(initial);
+    els.themeToggle.addEventListener("click", () => {
+      const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+      applyTheme(next);
+      localStorage.setItem("pf-theme", next);
+    });
+  };
+
+  const applyTheme = (name) => {
+    document.documentElement.dataset.theme = name;
+    els.themeIcon.textContent = name === "light" ? "☀" : "☾";
   };
 
   els.run.addEventListener("click", () => run("redact"));
@@ -158,10 +226,59 @@
     els.highlight.textContent = "";
     els.redacted.textContent = "";
     els.spansBody.innerHTML = "";
+    els.filename.textContent = "";
+    els.sample.value = "";
+    lastResult = { spans: [], redacted: "", input: "" };
     setStatus("");
   });
   els.mode.addEventListener("change", onModeChange);
 
+  els.uploadBtn.addEventListener("click", () => els.upload.click());
+  els.upload.addEventListener("change", (e) => {
+    const file = e.target.files && e.target.files[0];
+    readFile(file);
+    els.upload.value = "";
+  });
+
+  ["dragenter", "dragover"].forEach((evt) =>
+    els.dropzone.addEventListener(evt, (e) => {
+      e.preventDefault();
+      els.dropzone.classList.add("dragover");
+    })
+  );
+  ["dragleave", "drop"].forEach((evt) =>
+    els.dropzone.addEventListener(evt, (e) => {
+      e.preventDefault();
+      els.dropzone.classList.remove("dragover");
+    })
+  );
+  els.dropzone.addEventListener("drop", (e) => {
+    const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    readFile(file);
+  });
+
+  els.copyRedacted.addEventListener("click", async () => {
+    if (!lastResult.redacted) return setStatus("Сначала запустите Redact.", true);
+    try {
+      await navigator.clipboard.writeText(lastResult.redacted);
+      setStatus("Redacted text copied to clipboard.");
+    } catch (e) {
+      setStatus(`Clipboard error: ${e.message}`, true);
+    }
+  });
+  els.downloadTxt.addEventListener("click", () => {
+    if (!lastResult.redacted) return setStatus("Сначала запустите Redact.", true);
+    downloadBlob("redacted.txt", "text/plain;charset=utf-8", lastResult.redacted);
+  });
+  els.downloadJson.addEventListener("click", () => {
+    if (!lastResult.spans.length && !lastResult.redacted) {
+      return setStatus("Сначала запустите Redact или Detect.", true);
+    }
+    const payload = JSON.stringify(lastResult, null, 2);
+    downloadBlob("result.json", "application/json", payload);
+  });
+
+  setupTheme();
   onModeChange();
   loadSamples();
   loadHealth();

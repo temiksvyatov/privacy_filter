@@ -13,15 +13,18 @@ class _FakePF(PrivacyFilter):
         self.aggregation_strategy = "simple"
         self._pipe = None
 
-    def detect(self, text):
+    def detect(self, text, min_score=0.0):
         if "alice@example.com" in text:
             start = text.index("alice@example.com")
+            score = 0.99
+            if score < min_score:
+                return []
             return [Span(
                 entity="private_email",
                 text="alice@example.com",
                 start=start,
                 end=start + len("alice@example.com"),
-                score=0.99,
+                score=score,
             )]
         return []
 
@@ -29,6 +32,7 @@ class _FakePF(PrivacyFilter):
 def _install_fake(monkeypatch):
     fake = _FakePF()
     pf_filter.get_filter.cache_clear()
+    svc._detect_cache.clear()
     monkeypatch.setattr(svc, "get_filter", lambda *a, **kw: fake)
 
 
@@ -96,3 +100,51 @@ def test_redact_mask_char_via_api(monkeypatch):
     )
     assert r.status_code == 200
     assert r.json()["redacted"] == "ping ***************** please"
+
+
+def test_redact_file_endpoint(monkeypatch):
+    _install_fake(monkeypatch)
+    client = TestClient(svc.app)
+    payload = "ping alice@example.com please".encode("utf-8")
+    r = client.post(
+        "/redact/file",
+        files={"file": ("notes.txt", payload, "text/plain")},
+        data={"mask_char": "*"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["redacted"] == "ping ***************** please"
+    assert body["spans"][0]["entity"] == "private_email"
+
+
+def test_redact_file_rejects_too_large(monkeypatch):
+    _install_fake(monkeypatch)
+    monkeypatch.setattr(svc, "MAX_UPLOAD_BYTES", 16)
+    client = TestClient(svc.app)
+    big = ("x" * 64).encode("utf-8")
+    r = client.post(
+        "/redact/file",
+        files={"file": ("big.txt", big, "text/plain")},
+    )
+    assert r.status_code == 413
+
+
+def test_detect_cache_marks_second_hit(monkeypatch):
+    _install_fake(monkeypatch)
+    client = TestClient(svc.app)
+    body = {"text": "ping alice@example.com please"}
+    r1 = client.post("/detect", json=body)
+    r2 = client.post("/detect", json=body)
+    assert r1.json()["cached"] is False
+    assert r2.json()["cached"] is True
+
+
+def test_min_score_filters(monkeypatch):
+    _install_fake(monkeypatch)
+    client = TestClient(svc.app)
+    r = client.post(
+        "/detect",
+        json={"text": "ping alice@example.com please", "min_score": 0.999999},
+    )
+    assert r.status_code == 200
+    assert r.json()["spans"] == []

@@ -8,19 +8,33 @@
 </head>
 <body>
   <header>
-    <h1>OpenAI Privacy Filter</h1>
-    <p class="muted" id="meta">Loading…</p>
+    <div>
+      <h1>OpenAI Privacy Filter</h1>
+      <p class="muted" id="meta">Loading…</p>
+    </div>
+    <div class="header-actions">
+      <button id="theme_toggle" type="button" class="ghost" title="Toggle theme" aria-label="Toggle theme">
+        <span id="theme_icon">◐</span>
+      </button>
+    </div>
   </header>
 
   <main>
-    <section class="panel">
+    <section class="panel" id="dropzone">
       <div class="row">
         <label for="sample">Sample:</label>
         <select id="sample"><option value="">— pick one —</option></select>
+
+        <button id="upload_btn" type="button" class="ghost">Upload file…</button>
+        <input id="upload" type="file" accept=".txt,.md,.log,.csv,.json,.html,.xml,.yml,.yaml,text/*" hidden />
+
+        <div class="spacer"></div>
+        <span id="filename" class="muted"></span>
         <button id="clear" type="button" class="ghost">Clear</button>
       </div>
 
-      <textarea id="input" rows="10" spellcheck="false" placeholder="Paste any text — emails, logs, notes, code…"></textarea>
+      <textarea id="input" rows="10" spellcheck="false"
+                placeholder="Paste text, drop a file, or pick a sample…"></textarea>
 
       <div class="row">
         <label for="mode">Mode:</label>
@@ -31,6 +45,13 @@
         </select>
         <input id="mode_value" type="text" maxlength="32" value="*" />
 
+        <label for="min_score" class="ml">Min score:</label>
+        <input id="min_score" type="number" min="0" max="1" step="0.05" value="0.5" />
+
+        <label class="checkbox">
+          <input id="ru_postpass" type="checkbox" checked /> RU regex post-pass
+        </label>
+
         <div class="spacer"></div>
         <button id="run" type="button" class="primary">Redact</button>
         <button id="detect_only" type="button">Detect only</button>
@@ -40,12 +61,20 @@
     </section>
 
     <section class="panel">
-      <h2>Highlighted input</h2>
+      <div class="row tight">
+        <h2>Highlighted input</h2>
+      </div>
       <pre id="highlight" class="output"></pre>
     </section>
 
     <section class="panel">
-      <h2>Redacted output</h2>
+      <div class="row tight">
+        <h2>Redacted output</h2>
+        <div class="spacer"></div>
+        <button id="copy_redacted" type="button" class="ghost">Copy</button>
+        <button id="download_txt" type="button" class="ghost">Download .txt</button>
+        <button id="download_json" type="button" class="ghost">Download .json</button>
+      </div>
       <pre id="redacted" class="output"></pre>
     </section>
 
