@@ -24,6 +24,29 @@ def _percentile(values: list[float], p: float) -> float:
     return ordered[k]
 
 
+def _maybe_cuda_sync(device: str | int | None) -> None:
+    """Block until pending CUDA kernels finish before stopping the timer.
+
+    P8: `time.perf_counter()` on CUDA returns at kernel-launch, not at
+    completion. Without an explicit synchronize call, GPU benchmarks
+    look two to ten times faster than reality. CPU paths are no-ops.
+    """
+    if device is None:
+        return
+    if isinstance(device, int):
+        is_cuda = device >= 0
+    else:
+        is_cuda = str(device).startswith("cuda")
+    if not is_cuda:
+        return
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+    except ImportError:
+        return
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="pf_tester.bench")
     p.add_argument("--model", default=DEFAULT_MODEL)
@@ -43,6 +66,7 @@ def main(argv: list[str] | None = None) -> int:
 
     for _ in range(max(0, args.warmup)):
         pf.detect(texts[0])
+    _maybe_cuda_sync(args.device)
 
     per_doc_latencies: list[float] = []
     per_run_throughput: list[float] = []
@@ -52,6 +76,7 @@ def main(argv: list[str] | None = None) -> int:
         t0 = time.perf_counter()
         if args.batch_size > 1:
             results = pf.detect_batch(texts, batch_size=args.batch_size)
+            _maybe_cuda_sync(args.device)
             span_total += sum(len(r) for r in results)
             elapsed = time.perf_counter() - t0
         else:
@@ -59,6 +84,7 @@ def main(argv: list[str] | None = None) -> int:
             for t in texts:
                 ts = time.perf_counter()
                 spans = pf.detect(t)
+                _maybe_cuda_sync(args.device)
                 d = time.perf_counter() - ts
                 per_doc_latencies.append(d * 1000)
                 span_total += len(spans)

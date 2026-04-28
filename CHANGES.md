@@ -181,3 +181,53 @@ Tests: 5 new cases (livez, readyz×2, health limits, 503 leak guard).
   RU regex toggle, surfacing the new strict mode added in commit 5.
 - Cosmetics: human-readable byte formatting (`KB / MB`) in error
   messages and the `filename` label.
+
+### 8. `chore: package facade, typed health, accurate CUDA bench`
+
+- **A7** (REVIEW §1.2): `pf_tester/__init__.py` only exported
+  `PrivacyFilter` and `Span`. Library users had to reach into private
+  modules for `get_filter`, `ru_postpass`, `Entity`, `redact` and
+  `DEFAULT_MODEL`. Re-export them all from the package root.
+- **Q3** (REVIEW §5): added `from __future__ import annotations` to
+  `samples.py` for consistency with the rest of the package.
+- **Q4** (REVIEW §5): `health()` returned `dict[str, object]`, which
+  type-checkers could only verify as "anything". Replaced with a
+  `HealthResponse` `TypedDict` describing every field. Now `mypy`
+  catches typos in the JSON contract before runtime does.
+- **P8** (REVIEW §2.2): `bench.py` measured wall-clock with
+  `time.perf_counter()` on CUDA, which returns at kernel-launch — GPU
+  numbers were 2–10× too optimistic. New `_maybe_cuda_sync(device)`
+  helper detects CUDA devices and calls `torch.cuda.synchronize()`
+  after warmup and after each measured run. CPU paths are no-ops, so
+  the helper is safe in containers without CUDA.
+
+Tests: 56/56 still green; package import smoke-tested manually.
+
+---
+
+## Summary
+
+8 commits, each scoped to a related cluster of fixes from `REVIEW.md`.
+Test count grew from **27 → 56**.
+
+Items closed:
+- Critical (REVIEW §6 / "Критично"): F4, F1, A1, S2, F3, P6 — all done.
+- Strongly desirable (REVIEW §6 / "Сильно желательно"): A2, A3, P7, F5,
+  F2, P10 — all done. P9 (Prometheus / OTel) intentionally deferred —
+  observability scope grew larger than this refactor; left as a TODO.
+- Cosmetics (REVIEW §6): A6, A8, Q1, Q2, A7, Q3, Q4 — done. F10
+  (FP/regression tests) partially done via the new strict-mode and
+  TLD coverage tests; full FP suite is still on the backlog. Q5 (ruff/
+  mypy) and Q6 (pyproject.toml) deferred to a tooling-only PR.
+
+Server contract changes worth noting for downstream consumers:
+
+- New endpoints: `/livez`, `/readyz`.
+- New request fields: `ru_postpass_strict` (bool, both JSON and
+  multipart bodies).
+- New `/health` keys: `ready`, `cache_hits`, `cache_misses`,
+  `max_text_bytes`, `max_upload_bytes`, `inference_concurrency`.
+- Status code changes: invalid `mask_char` is now `422` everywhere
+  (was `400` on `/redact/file`); model-load failure is `503` (was
+  `500`) and never leaks the underlying exception message.
+- New env knobs: `PF_MAX_TEXT_BYTES`, `PF_INFERENCE_CONCURRENCY`.

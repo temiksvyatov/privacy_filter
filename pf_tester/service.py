@@ -12,6 +12,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import TypedDict
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -254,8 +255,22 @@ def index() -> FileResponse:
     return FileResponse(index_path, media_type="text/html; charset=utf-8")
 
 
+class HealthResponse(TypedDict):
+    status: str
+    ready: bool
+    model: str
+    domain: str
+    cache_size: int
+    cache_capacity: int
+    cache_hits: int
+    cache_misses: int
+    max_text_bytes: int
+    max_upload_bytes: int
+    inference_concurrency: int
+
+
 @app.get("/health")
-def health() -> dict[str, object]:
+def health() -> HealthResponse:
     stats = _detect_cache.stats()
     return {
         "status": "ok" if _READY else "degraded",

@@ -4,6 +4,8 @@ Categories: account_number, private_address, private_email, private_person,
 private_phone, private_url, private_date, secret.
 """
 
+from __future__ import annotations
+
 SAMPLES: dict[str, str] = {
     "person_address_date": (
         "Alice Johnson was born on 1990-01-02 and currently lives at "
