@@ -118,8 +118,49 @@ docker compose --profile gpu up --build pf-service-gpu
 повторные запуски стартуют без повторной выкачки. Healthcheck дёргает
 `/health` после прогрева (`start_period: 120s`).
 
-Эндпоинт после старта: `http://localhost:8000/health`,
-Swagger UI: `http://localhost:8000/docs`.
+Эндпоинты после старта:
+
+- `http://localhost:8000/` — встроенный web UI
+- `http://localhost:8000/docs` — Swagger
+- `http://localhost:8000/health`
+
+## Web UI + публикация через Caddy
+
+В контейнер встроен лёгкий одностраничный UI (vanilla JS, без сборки):
+textarea → кнопка `Redact` → подсветка PII в исходном тексте, таблица
+со спанами и редактированный текст. Никаких внешних запросов кроме
+своего же API — отлично для on-prem.
+
+Локально UI открывается на `http://localhost:8000/`. Чтобы выставить
+наружу через ваш уже настроенный Caddy:
+
+1. Прописать в `.env`:
+
+   ```env
+   DOMAIN=privacy-filter.example.com
+   HOST_PORT=8000
+   ```
+
+2. Поднять сервис: `docker compose up -d --build`.
+
+3. В вашем `Caddyfile` добавить блок (Caddy сам выпустит TLS-сертификат):
+
+   ```caddy
+   privacy-filter.example.com {
+       reverse_proxy 127.0.0.1:8000
+   }
+   ```
+
+   Если Caddy и сервис в одной docker-сети — используйте имя контейнера:
+   `reverse_proxy pf-tester:8000`.
+
+Что делает переменная `DOMAIN` внутри приложения:
+
+- добавляет `https://${DOMAIN}` (и `http://`) в CORS allow-list;
+- показывается в шапке UI (`/health` отдаёт это поле).
+
+Uvicorn запускается с `--proxy-headers --forwarded-allow-ips "*"`, поэтому
+корректно отрабатывает `X-Forwarded-Proto`/`X-Forwarded-For` от Caddy.
 
 ## Тесты
 

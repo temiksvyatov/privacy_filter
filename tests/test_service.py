@@ -68,3 +68,31 @@ def test_samples_endpoint(monkeypatch):
     assert r.status_code == 200
     body = r.json()
     assert "person_address_date" in body
+
+
+def test_index_serves_html(monkeypatch):
+    _install_fake(monkeypatch)
+    client = TestClient(svc.app)
+    r = client.get("/")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert "OpenAI Privacy Filter" in r.text
+
+
+def test_static_assets(monkeypatch):
+    _install_fake(monkeypatch)
+    client = TestClient(svc.app)
+    r = client.get("/static/app.js")
+    assert r.status_code == 200
+    assert "javascript" in r.headers["content-type"]
+
+
+def test_redact_mask_char_via_api(monkeypatch):
+    _install_fake(monkeypatch)
+    client = TestClient(svc.app)
+    r = client.post(
+        "/redact",
+        json={"text": "ping alice@example.com please", "mask_char": "*"},
+    )
+    assert r.status_code == 200
+    assert r.json()["redacted"] == "ping ***************** please"

@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OpenAI Privacy Filter — Tester</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header>
+    <h1>OpenAI Privacy Filter</h1>
+    <p class="muted" id="meta">Loading…</p>
+  </header>
+
+  <main>
+    <section class="panel">
+      <div class="row">
+        <label for="sample">Sample:</label>
+        <select id="sample"><option value="">— pick one —</option></select>
+        <button id="clear" type="button" class="ghost">Clear</button>
+      </div>
+
+      <textarea id="input" rows="10" spellcheck="false" placeholder="Paste any text — emails, logs, notes, code…"></textarea>
+
+      <div class="row">
+        <label for="mode">Mode:</label>
+        <select id="mode">
+          <option value="tag">[ENTITY_TYPE] tag</option>
+          <option value="placeholder">Custom placeholder</option>
+          <option value="mask_char" selected>Mask char (preserve length)</option>
+        </select>
+        <input id="mode_value" type="text" maxlength="32" value="*" />
+
+        <div class="spacer"></div>
+        <button id="run" type="button" class="primary">Redact</button>
+        <button id="detect_only" type="button">Detect only</button>
+      </div>
+
+      <p id="status" class="muted"></p>
+    </section>
+
+    <section class="panel">
+      <h2>Highlighted input</h2>
+      <pre id="highlight" class="output"></pre>
+    </section>
+
+    <section class="panel">
+      <h2>Redacted output</h2>
+      <pre id="redacted" class="output"></pre>
+    </section>
+
+    <section class="panel">
+      <h2>Detected spans</h2>
+      <table id="spans">
+        <thead><tr><th>Entity</th><th>Text</th><th>Range</th><th>Score</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

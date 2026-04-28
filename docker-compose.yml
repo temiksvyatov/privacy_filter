@@ -6,12 +6,24 @@ services:
     image: pf-tester:cpu
     container_name: pf-tester
     ports:
-      - "8000:8000"
+      - "${HOST_PORT:-8000}:8000"
     environment:
       PF_MODEL: ${PF_MODEL:-openai/privacy-filter}
       PF_DEVICE: ${PF_DEVICE:-cpu}
+      DOMAIN: ${DOMAIN:-}
       HF_HOME: /root/.cache/huggingface
       TRANSFORMERS_CACHE: /root/.cache/huggingface
+      FORWARDED_ALLOW_IPS: "*"
+    command:
+      - uvicorn
+      - pf_tester.service:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --proxy-headers
+      - --forwarded-allow-ips
+      - "*"
     volumes:
       - hf_cache:/root/.cache/huggingface
     restart: unless-stopped
@@ -50,13 +62,25 @@ services:
     container_name: pf-tester-gpu
     profiles: ["gpu"]
     ports:
-      - "8000:8000"
+      - "${HOST_PORT:-8000}:8000"
     environment:
       PF_MODEL: ${PF_MODEL:-openai/privacy-filter}
       PF_DEVICE: ${PF_DEVICE:-cuda:0}
+      DOMAIN: ${DOMAIN:-}
       HF_HOME: /root/.cache/huggingface
       TRANSFORMERS_CACHE: /root/.cache/huggingface
       NVIDIA_VISIBLE_DEVICES: all
+      FORWARDED_ALLOW_IPS: "*"
+    command:
+      - uvicorn
+      - pf_tester.service:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --proxy-headers
+      - --forwarded-allow-ips
+      - "*"
     volumes:
       - hf_cache:/root/.cache/huggingface
     deploy:
